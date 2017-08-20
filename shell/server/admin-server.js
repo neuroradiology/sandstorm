@@ -40,15 +40,6 @@ const publicAdminSettings = [
   "billingPromptUrl",
 ];
 
-const FEATURE_KEY_FIELDS_PUBLISHED_TO_ADMINS = [
-  "customer", "expires", "features", "isElasticBilling", "isTrial", "issued", "userLimit",
-  "secret", "renewalProblem",
-];
-
-const PUBLIC_FEATURE_KEY_FIELDS = [
-  "expires", "features",
-];
-
 const smtpConfigShape = {
   hostname: String,
   port: Number,
@@ -76,7 +67,6 @@ Meteor.methods({
     // Only check configurations for OAuth services.
     const oauthServices = ["google", "github"];
     if (value && (oauthServices.indexOf(serviceName) != -1)) {
-      const ServiceConfiguration = Package["service-configuration"].ServiceConfiguration;
       const config = ServiceConfiguration.configurations.findOne({ service: serviceName });
       if (!config) {
         throw new Meteor.Error(403, "You must configure the " + serviceName +
@@ -117,25 +107,6 @@ Meteor.methods({
     Settings.upsert({ _id: name }, { $set: { value: value } });
   },
 
-  submitFeatureKey: function (token, textBlock) {
-    checkAuth(token);
-    check(textBlock, Match.OneOf(null, String));
-
-    const db = this.connection.sandstormDb;
-
-    // setNewFeatureKey is provided in feature-key.js
-    setNewFeatureKey(db, textBlock);
-  },
-
-  renewFeatureKey: function (token) {
-    checkAuth(token);
-
-    const db = this.connection.sandstormDb;
-
-    // renewFeatureKey is provided in feature-key.js.
-    renewFeatureKey(db, { interactive: true });
-  },
-
   saveOrganizationSettings(token, params) {
     checkAuth(token);
     check(params, {
@@ -168,8 +139,6 @@ Meteor.methods({
   adminConfigureLoginService: function (token, options) {
     checkAuth(token);
     check(options, Match.ObjectIncluding({ service: String }));
-
-    const ServiceConfiguration = Package["service-configuration"].ServiceConfiguration;
 
     ServiceConfiguration.configurations.upsert({ service: options.service }, options);
   },
@@ -216,7 +185,7 @@ Meteor.methods({
     try {
       sendEmail({
         to: to,
-        from: globalDb.getServerTitle() + " <" + returnAddress + ">",
+        from: { name: globalDb.getServerTitle(), address: returnAddress },
         subject: "Testing your Sandstorm's SMTP setting",
         text: "Success! Your outgoing SMTP is working.",
         smtpConfig: restConfig,
@@ -255,10 +224,11 @@ Meteor.methods({
 
   sendInvites: function (token, origin, from, list, subject, message, quota) {
     checkAuth(token);
-    check([origin, from, list, subject, message], [String]);
+    check(from, { name: String, address: String });
+    check([origin, list, subject, message], [String]);
     check(quota, Match.OneOf(undefined, null, Number));
 
-    if (!from.trim()) {
+    if (!from.address.trim()) {
       throw new Meteor.Error(403, "Must enter 'from' address.");
     }
 
@@ -413,7 +383,7 @@ Meteor.publish("admin", function (token) {
 
 Meteor.publish("adminServiceConfiguration", function (token) {
   if (!authorizedAsAdmin(token, this.userId)) return [];
-  return Package["service-configuration"].ServiceConfiguration.configurations.find();
+  return ServiceConfiguration.configurations.find();
 });
 
 Meteor.publish("publicAdminSettings", function () {
@@ -576,16 +546,42 @@ Meteor.publish("adminLog", function (token) {
   const fd = Fs.openSync(logfile, "r");
   const startSize = Fs.fstatSync(fd).size;
 
+  // Difference between the current file offset and the subscription offset. Can be non-zero when
+  // logs have rotated.
+  let extraOffset = 0;
+
+  if (startSize < 8192) {
+    // Log size is less than window size. Check for rotated log and grab its tail.
+    const logfile1 = SANDSTORM_LOGDIR + "/sandstorm.log.1";
+    if (Fs.existsSync(logfile1)) {
+      const fd1 = Fs.openSync(logfile1, "r");
+      const startSize1 = Fs.fstatSync(fd1).size;
+      const amountFromLog1 = Math.min(startSize1, 8192 - startSize);
+      const offset1 = startSize1 - amountFromLog1;
+      const buf = new Buffer(amountFromLog1);
+      const n = Fs.readSync(fd1, buf, 0, buf.length, offset);
+      if (n > 0) {
+        this.added("adminLog", 0, { text: buf.toString("utf8", 0, n) });
+        extraOffset += n;
+      }
+    }
+  }
+
   // Start tailing at EOF - 8k.
   let offset = Math.max(0, startSize - 8192);
 
   const _this = this;
   function doTail() {
+    if (Fs.fstatSync(fd).size < offset) {
+      extraOffset += offset;
+      offset = 0;
+    }
+
     for (;;) {
       const buf = new Buffer(Math.max(1024, startSize - offset));
       const n = Fs.readSync(fd, buf, 0, buf.length, offset);
       if (n <= 0) break;
-      _this.added("adminLog", offset, { text: buf.toString("utf8", 0, n) });
+      _this.added("adminLog", offset + extraOffset, { text: buf.toString("utf8", 0, n) });
       offset += n;
     }
   }
@@ -622,65 +618,6 @@ Meteor.publish("adminApiTokens", function (token) {
       owner: 1,
     },
   });
-});
-
-Meteor.publish("featureKey", function (forAdmin, token) {
-  // Note: we publish the *raw* feature key data to the client, exactly as it was loaded from the
-  // signed blob.  Any mapping from the raw data to "effective" feature key/limits should be applied
-  // in the implementation of db.currentFeatureKey().
-  if (forAdmin && !authorizedAsAdmin(token, this.userId)) return [];
-
-  const fields = forAdmin ? FEATURE_KEY_FIELDS_PUBLISHED_TO_ADMINS
-                          : PUBLIC_FEATURE_KEY_FIELDS;
-
-  const db = this.connection.sandstormDb;
-  const featureKeyQuery = db.collections.featureKey.find({ _id: "currentFeatureKey" });
-  const observeHandle = featureKeyQuery.observe({
-    added: (doc) => {
-      // Load and verify the signed feature key.
-      const buf = new Buffer(doc.value);
-      const featureKey = loadSignedFeatureKey(buf);
-      if (doc.renewalProblem) {
-        featureKey.renewalProblem = doc.renewalProblem;
-      }
-
-      if (featureKey) {
-        // If the signature is valid, publish the feature key information.
-        const filteredFeatureKey = _.pick(featureKey, ...fields);
-        this.added("featureKey", doc._id, filteredFeatureKey);
-      }
-    },
-
-    changed: (newDoc, oldDoc) => {
-      // Load and reverify the new signed feature key.
-      const buf = new Buffer(newDoc.value);
-      const featureKey = loadSignedFeatureKey(buf);
-      if (newDoc.renewalProblem) {
-        featureKey.renewalProblem = newDoc.renewalProblem;
-      } else if (oldDoc.renewalProblem) {
-        featureKey.renewalProblem = undefined;
-      }
-
-      if (featureKey) {
-        // If the signature is valid, call this.changed() with the interesting fields.
-        const filteredFeatureKey = _.pick(featureKey, ...fields);
-        this.changed("featureKey", newDoc._id, filteredFeatureKey);
-      } else {
-        // Otherwise, call this.removed(), since the new feature key is invalid.
-        this.removed("featureKey", oldDoc._id);
-      }
-    },
-
-    removed: (oldDoc) => {
-      this.removed("featureKey", oldDoc._id);
-    },
-  });
-
-  this.onStop(() => {
-    observeHandle.stop();
-  });
-
-  this.ready();
 });
 
 Meteor.publish("hasAdmin", function (token) {

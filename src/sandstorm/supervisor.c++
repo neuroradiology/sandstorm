@@ -663,8 +663,6 @@ kj::MainBuilder::Validity SupervisorMain::addCommandArg(kj::StringPtr arg) {
 // =====================================================================================
 
 kj::MainBuilder::Validity SupervisorMain::run() {
-  isIpTablesAvailable = checkIfIpTablesLoaded();
-
   setupSupervisor();
 
   // Exits if another supervisor is still running in this sandbox.
@@ -933,8 +931,10 @@ void SupervisorMain::unshareOuter() {
   }
 
   // To really unshare the mount namespace, we also have to make sure all mounts are private.
-  // The parameters here were derived by strace'ing `mount --make-rprivate /`.  AFAICT the flags
-  // are undocumented.  :(
+  // See the "SHARED SUBTREES" section of mount_namespaces(7) and the section "Changing the
+  // propagation type of an existing mount" in mount(2). Cliffsnotes version: MS_PRIVATE sets
+  // the "target" argument (in this case "/") to private, and MS_REC applies this recursively.
+  // All other arguments are ignored.
   KJ_SYSCALL(mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr));
 
   // Set a dummy host / domain so the grain can't see the real one.  (unshare(CLONE_NEWUTS) means
@@ -1136,6 +1136,18 @@ void SupervisorMain::setupSeccomp() {
   CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EAFNOSUPPORT), SCMP_SYS(socket), 1,
      SCMP_A0(SCMP_CMP_EQ, AF_KEY)));
 
+  // Disallow DCCP sockets due to Linux CVE-2017-6074.
+  //
+  // The `type` parameter to `socket()` can have SOCK_NONBLOCK and SOCK_CLOEXEC bitwise-or'd in,
+  // so we need to mask those out for our check. The kernel defines a constant SOCK_TYPE_MASK
+  // as 0x0f, but this constant doesn't appear to be in the headers, so we specify by hand.
+  //
+  // TODO(security): We should probably disallow everything except SOCK_STREAM and SOCK_DGRAM but
+  //   I don't totally get how to write such conditionals with libseccomp. We should really dump
+  //   libseccomp and write in BPF assembly, which is frankly much easier to understand.
+  CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPROTONOSUPPORT), SCMP_SYS(socket), 1,
+     SCMP_A1(SCMP_CMP_MASKED_EQ, 0x0f, SOCK_DCCP)));
+
   CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(add_key), 0));
   CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(request_key), 0));
   CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(keyctl), 0));
@@ -1236,252 +1248,6 @@ void SupervisorMain::unshareNetwork() {
     ifr.ifr_ifru.ifru_flags = IFF_LOOPBACK | IFF_UP | IFF_RUNNING;
     KJ_SYSCALL(ioctl(fd, SIOCSIFFLAGS, &ifr));
   }
-
-  // Check if iptables module is available, skip the rest if not.
-  if (!isIpTablesAvailable) {
-    // TODO(soon): Put a runtime warning here, so that people can notice if this code won't work.
-    return;
-  }
-
-  // Create a fake network interface "dummy0" of type "dummy". We need this only so that we can
-  // route packets to it which we can in turn filter with iptables.
-  {
-    int netlink;
-    KJ_SYSCALL(netlink = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE));
-    KJ_DEFER(close(netlink));
-
-    socklen_t bufsize = 32768;
-    KJ_SYSCALL(setsockopt(netlink, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize)));
-    bufsize = 1048576;
-    KJ_SYSCALL(setsockopt(netlink, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)));
-
-    StructyMessage message(4);
-
-    auto header = message.add<struct nlmsghdr>();
-
-    header->nlmsg_type = RTM_NEWLINK;
-    header->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-
-    message.add<struct ifinfomsg>();  // leave zero'd
-
-    auto ifnameAttr = message.add<struct rtattr>();
-    ifnameAttr->rta_len = sizeof(struct rtattr) + sizeof("dummy0");
-    ifnameAttr->rta_type = IFLA_IFNAME;
-    message.addString("dummy0");
-
-    auto portAttr = message.add<struct rtattr>();
-    portAttr->rta_type = IFLA_LINKINFO;
-
-    // We're cargo-culting a bit here. IFLA_LINKINFO is not documented but it looks kind of
-    // like an rtattr. For some reason the string value is not NUL-terminated, though.
-    auto typeAttr = message.add<struct rtattr>();
-    typeAttr->rta_type = IFLA_INFO_KIND;  // Looks like it might be the right constant?
-    typeAttr->rta_len = sizeof(struct rtattr) + strlen("dummy");
-    message.addBytes("dummy", strlen("dummy"));
-
-    portAttr->rta_len = offsetBetween(portAttr, message.end());
-
-    header->nlmsg_len = offsetBetween(header, message.end());
-
-    struct msghdr socketMsg;
-    memset(&socketMsg, 0, sizeof(socketMsg));
-
-    struct sockaddr_nl netlinkAddr;
-    memset(&netlinkAddr, 0, sizeof(netlinkAddr));
-    netlinkAddr.nl_family = AF_NETLINK;
-    socketMsg.msg_name = &netlinkAddr;
-    socketMsg.msg_namelen = sizeof(netlinkAddr);
-
-    struct iovec iov;
-    iov.iov_base = message.begin();
-    iov.iov_len = message.size();
-    socketMsg.msg_iov = &iov;
-    socketMsg.msg_iovlen = 1;
-
-    KJ_SYSCALL(sendmsg(netlink, &socketMsg, 0));
-
-    struct {
-      struct nlmsghdr header;
-      struct nlmsgerr error;
-      char buffer[512];
-    } result;
-    iov.iov_base = &result;
-    iov.iov_len = sizeof(result);
-
-    KJ_SYSCALL(recvmsg(netlink, &socketMsg, 0));
-
-    KJ_ASSERT(result.header.nlmsg_type == NLMSG_ERROR);
-    KJ_ASSERT(result.header.nlmsg_seq == 0);
-    if (result.error.error != 0) {
-      KJ_FAIL_SYSCALL("netlink(ip link add dummy0 type dummy)", -result.error.error);
-    }
-  }
-
-  // Bring up dummy0.
-  {
-    // Set the address of "dummy0".
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    strcpy(ifr.ifr_ifrn.ifrn_name, "dummy0");
-    struct sockaddr_in* addr = reinterpret_cast<struct sockaddr_in*>(&ifr.ifr_ifru.ifru_addr);
-    addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = htonl(0xc0a8fa02);  // 192.168.250.2
-    KJ_SYSCALL(ioctl(fd, SIOCSIFADDR, &ifr));
-
-    // Set flags to enable "dummy0".
-    memset(&ifr.ifr_ifru, 0, sizeof(ifr.ifr_ifru));
-    ifr.ifr_ifru.ifru_flags = IFF_UP | IFF_RUNNING;
-    KJ_SYSCALL(ioctl(fd, SIOCSIFFLAGS, &ifr));
-  }
-
-  // Route external addresses through the "dummy0" interface, so that our iptables trick works.
-  {
-    struct rtentry route;
-    memset(&route, 0, sizeof(route));
-    route.rt_flags = RTF_UP | RTF_GATEWAY;
-    route.rt_dst.sa_family = AF_INET;
-    route.rt_gateway.sa_family = AF_INET;
-    reinterpret_cast<struct sockaddr_in*>(&route.rt_gateway)->sin_addr.s_addr =
-        htonl(0xc0a8fa01);  // 192.168.250.1; any address in 192.168.250.x would work here
-
-    KJ_SYSCALL(ioctl(fd, SIOCADDRT, &route));
-  }
-
-  // Set up iptables to redirect all non-local traffic to 127.0.0.1:23136.
-  //
-  // This should be equivalent-ish to:
-  //   iptables -t nat -A OUTPUT -p tcp -j DNAT --to 127.0.0.1:23136
-  //   iptables -t nat -A OUTPUT -p udp -j DNAT --to 127.0.0.1:23136
-  {
-    // Get the existing iptables info, needed in order to properly fill out the update request.
-    struct ipt_getinfo info;
-    memset(&info, 0, sizeof(info));
-    strcpy(info.name, "nat");
-    socklen_t optsize = sizeof(info);
-    KJ_SYSCALL(getsockopt(fd, IPPROTO_IP, IPT_SO_GET_INFO, &info, &optsize));
-
-    // Linux kernel interfaces like to be designed as a packed list of structs of varying types,
-    // kind of like SBE but uglier. Ugh.
-    StructyMessage message;
-
-    // Create a replace message.
-    auto replace = message.add<struct ipt_replace>();
-    strcpy(replace->name, "nat");
-    replace->valid_hooks = info.valid_hooks;
-
-    // The kernel insists that we give it a place to write out the counters on the existing
-    // table entries. Of course, they should all be zero, and we don't care either way. But we
-    // have to give it space.
-    struct xt_counters oldCounters[info.num_entries];
-    memset(oldCounters, 0, sizeof(oldCounters));
-    replace->num_counters = info.num_entries;
-    replace->counters = oldCounters;
-
-    // Create an entry which accepts all packets destined for 127.0.0.0/8.
-    ++replace->num_entries;
-    auto acceptLocal = message.add<struct ipt_entry>();
-    acceptLocal->ip.dst.s_addr = htonl(0x7F000000);   // ip   127.0.0.0
-    acceptLocal->ip.dmsk.s_addr = htonl(0xFF000000);  // mask 255.0.0.0
-    auto acceptLocalTarget = message.add<struct ipt_entry_target>();
-    *message.add<int>() = -1 - NF_ACCEPT;
-    acceptLocalTarget->u.target_size = offsetBetween(acceptLocalTarget, message.end());
-    acceptLocal->target_offset = offsetBetween(acceptLocal, acceptLocalTarget);
-    acceptLocal->next_offset = offsetBetween(acceptLocal, message.end());
-
-    // Create an entry which forwards all TCP packets to a local port.
-    ++replace->num_entries;
-    auto dnatTcp = message.add<struct ipt_entry>();
-    dnatTcp->ip.proto = IPPROTO_TCP;
-    auto dnatTcpTarget = message.add<struct ipt_entry_target>();
-    auto dnatTcpRange = message.add<struct nf_nat_ipv4_multi_range_compat>();
-    dnatTcpRange->rangesize = 1;
-    dnatTcpRange->range[0].flags = NF_NAT_RANGE_PROTO_SPECIFIED | NF_NAT_RANGE_MAP_IPS;
-    dnatTcpRange->range[0].min_ip = htonl(0x7F000001);  // 127.0.0.1
-    dnatTcpRange->range[0].max_ip = htonl(0x7F000001);  // 127.0.0.1
-    dnatTcpRange->range[0].min.tcp.port = htons(23136);
-    dnatTcpRange->range[0].max.tcp.port = htons(23136);
-    dnatTcpTarget->u.user.target_size = offsetBetween(dnatTcpTarget, message.end());
-    strcpy(dnatTcpTarget->u.user.name, "DNAT");
-    dnatTcp->target_offset = offsetBetween(dnatTcp, dnatTcpTarget);
-    dnatTcp->next_offset = offsetBetween(dnatTcp, message.end());
-
-    // Create an entry which forwards all UDP packets to a local port.
-    ++replace->num_entries;
-    auto dnatUdp = message.add<struct ipt_entry>();
-    dnatUdp->ip.proto = IPPROTO_UDP;
-    auto dnatUdpTarget = message.add<struct ipt_entry_target>();
-    auto dnatUdpRange = message.add<struct nf_nat_ipv4_multi_range_compat>();
-    dnatUdpRange->rangesize = 1;
-    dnatUdpRange->range[0].flags = NF_NAT_RANGE_PROTO_SPECIFIED | NF_NAT_RANGE_MAP_IPS;
-    dnatUdpRange->range[0].min_ip = htonl(0x7F000001);  // 127.0.0.1
-    dnatUdpRange->range[0].max_ip = htonl(0x7F000001);  // 127.0.0.1
-    dnatUdpRange->range[0].min.udp.port = htons(23136);
-    dnatUdpRange->range[0].max.udp.port = htons(23136);
-    dnatUdpTarget->u.user.target_size = offsetBetween(dnatUdpTarget, message.end());
-    strcpy(dnatUdpTarget->u.user.name, "DNAT");
-    dnatUdp->target_offset = offsetBetween(dnatUdp, dnatUdpTarget);
-    dnatUdp->next_offset = offsetBetween(dnatUdp, message.end());
-
-    // Create an entry which accepts everything.
-    ++replace->num_entries;
-    auto acceptAll = message.add<struct ipt_entry>();
-    auto acceptAllTarget = message.add<struct ipt_entry_target>();
-    *message.add<int>() = -1 - NF_ACCEPT;
-    acceptAllTarget->u.target_size = offsetBetween(acceptAllTarget, message.end());
-    acceptAll->target_offset = offsetBetween(acceptAll, acceptAllTarget);
-    acceptAll->next_offset = offsetBetween(acceptAll, message.end());
-
-    // Cap it off with an error entry.
-    ++replace->num_entries;
-    auto error = message.add<struct ipt_entry>();
-    auto errorTarget = message.add<struct xt_error_target>();
-    errorTarget->target.u.user.target_size = offsetBetween(errorTarget, message.end());
-    strcpy(errorTarget->target.u.user.name, "ERROR");
-    strcpy(errorTarget->errorname, "ERROR");
-    error->target_offset = offsetBetween(error, errorTarget);
-    error->next_offset = offsetBetween(error, message.end());
-
-    replace->hook_entry[NF_INET_PRE_ROUTING] = offsetBetween(replace->entries, acceptAll);
-    replace->hook_entry[NF_INET_LOCAL_IN] = offsetBetween(replace->entries, acceptAll);
-    replace->hook_entry[NF_INET_FORWARD] = offsetBetween(replace->entries, acceptAll);
-    replace->hook_entry[NF_INET_LOCAL_OUT] = offsetBetween(replace->entries, acceptLocal);
-    replace->hook_entry[NF_INET_POST_ROUTING] = offsetBetween(replace->entries, acceptAll);
-
-    replace->underflow[NF_INET_PRE_ROUTING] = offsetBetween(replace->entries, acceptAll);
-    replace->underflow[NF_INET_LOCAL_IN] = offsetBetween(replace->entries, acceptAll);
-    replace->underflow[NF_INET_FORWARD] = offsetBetween(replace->entries, acceptAll);
-    replace->underflow[NF_INET_LOCAL_OUT] = offsetBetween(replace->entries, acceptAll);
-    replace->underflow[NF_INET_POST_ROUTING] = offsetBetween(replace->entries, acceptAll);
-
-    replace->size = offsetBetween(replace->entries, message.end());
-
-    KJ_SYSCALL(setsockopt(fd, IPPROTO_IP, IPT_SO_SET_REPLACE, message.begin(), message.size()));
-  }
-}
-
-bool SupervisorMain::checkIfIpTablesLoaded() {
-  // Detect if the iptables kernel module is available. Must be called before entering the
-  // sandbox since this requires /proc.
-  //
-  // TODO(soon): This check is wrong because iptables could be compiled directly into the kernel
-  //   rather than as a module. Indeed, /proc/modules is reported to be sometimes absent in the
-  //   wild, perhaps when the kernel is compiled without module support. For now we'll assume
-  //   iptables is unavailable in that case.
-
-  KJ_IF_MAYBE(procModules, raiiOpenIfExists("/proc/modules", O_RDONLY)) {
-    kj::FdInputStream rawIn(kj::mv(*procModules));
-    kj::BufferedInputStreamWrapper bufferedIn(rawIn);
-
-    for (;;) {
-      KJ_IF_MAYBE(line, readLine(bufferedIn)) {
-        if (line->startsWith("ip_tables ")) return true;
-      } else {
-        break;
-      }
-    }
-  }
-
-  return false;
 }
 
 void SupervisorMain::maybeFinishMountingProc() {
@@ -2048,11 +1814,34 @@ public:
     // Seek to desired start point.
     struct stat stats;
     KJ_SYSCALL(fstat(logFile, &stats));
-    uint64_t backlog = kj::min(params.getBacklogAmount(), stats.st_size);
+    uint64_t requestedBacklog = params.getBacklogAmount();
+    uint64_t backlog = kj::min(requestedBacklog, stats.st_size);
     KJ_SYSCALL(lseek(logFile, stats.st_size - backlog, SEEK_SET));
+
+    // If the existing log file doesn't cover the whole request, check the previous log file.
+    kj::Maybe<kj::Promise<void>> firstWrite;
+    if (stats.st_size < requestedBacklog) {
+      KJ_IF_MAYBE(log1, raiiOpenIfExists("log.1", O_RDONLY)) {
+        struct stat stats1;
+        KJ_SYSCALL(fstat(*log1, &stats1));
+        uint64_t requestedBacklog1 = requestedBacklog - stats.st_size;
+        uint64_t backlog1 = kj::min(requestedBacklog1, stats1.st_size);
+        KJ_SYSCALL(lseek(*log1, stats1.st_size - backlog1, SEEK_SET));
+
+        kj::FdInputStream in(log1->get());
+        auto req = params.getStream().writeRequest();
+        auto data = req.initData(backlog1);
+        in.read(data.begin(), backlog1);
+        firstWrite = req.send().ignoreResult();
+      }
+    }
 
     // Create the watcher.
     auto watcher = kj::heap<LogWatcher>(eventPort, "log", kj::mv(logFile), params.getStream());
+
+    KJ_IF_MAYBE(f, firstWrite) {
+      watcher->addTask(kj::mv(*f));
+    }
 
     context.releaseParams();
     context.getResults(capnp::MessageSize { 4, 1 }).setHandle(kj::mv(watcher));
@@ -2175,12 +1964,18 @@ private:
       tasks.add(watchLoop());
     }
 
+    void addTask(kj::Promise<void> task) {
+      // HACK for watchLog().
+      tasks.add(kj::mv(task));
+    }
+
   private:
     kj::AutoCloseFd logFile;
     kj::AutoCloseFd inotify;
     kj::UnixEventPort::FdObserver inotifyObserver;
     ByteStream::Client stream;
     kj::TaskSet tasks;
+    off_t lastOffset = 0;
 
     void taskFailed(kj::Exception&& exception) override {
       KJ_LOG(ERROR, exception);
@@ -2196,6 +1991,15 @@ private:
         KJ_NONBLOCKING_SYSCALL(n = read(inotify, buffer, sizeof(buffer)));
         if (n < 0) break;
         KJ_ASSERT(n > 0);
+      }
+
+      // Check for recent rotation.
+      struct stat stats;
+      KJ_SYSCALL(fstat(logFile, &stats));
+      if (lastOffset > stats.st_size) {
+        // Looks like log was rotated.
+        lastOffset = 0;
+        KJ_SYSCALL(lseek(logFile, 0, SEEK_SET));
       }
 
       // Read all unread data from logFile and send it to the stream.
@@ -2219,6 +2023,8 @@ private:
 
         if (done) break;
       }
+
+      KJ_SYSCALL(lastOffset = lseek(logFile, 0, SEEK_CUR));
 
       // OK, now wait for more.
       return inotifyObserver.whenBecomesReadable().then([this]() {
@@ -2344,9 +2150,12 @@ kj::Promise<void> SupervisorMain::DefaultSystemConnector::run(
 
   auto acceptTask = systemConnector->run(ioContext, kj::mv(mainCap), kj::mv(coreRedirector));
 
-  // Wait for disconnect or accept loop failure or disk watch failure, then exit.
+  // Wait for disconnect or accept loop failure or disk watch failure, then exit. Also rotate log
+  // every 512k (thus having at most 1MB of logs at a time).
   acceptTask.exclusiveJoin(kj::mv(diskWatcherTask))
             .exclusiveJoin(appNetwork.onDisconnect())
+            .exclusiveJoin(rotateLog(ioContext.provider->getTimer(),
+                                     STDERR_FILENO, "log", 512u << 10))
             .wait(ioContext.waitScope);
 
   // Only onDisconnect() would return normally (rather than throw), so the app must have

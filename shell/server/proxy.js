@@ -18,11 +18,12 @@ import Bignum from "bignum";
 import { SANDSTORM_ALTHOME } from "/imports/server/constants.js";
 import { SandstormBackend, shouldRestartGrain } from "/imports/server/backend.js";
 import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
+import { REQUEST_HEADER_WHITELIST, RESPONSE_HEADER_WHITELIST }
+    from "/imports/server/header-whitelist.js";
 const Crypto = Npm.require("crypto");
 const ChildProcess = Npm.require("child_process");
 const Fs = Npm.require("fs");
 const Path = Npm.require("path");
-const Http = Npm.require("http");
 const Url = Npm.require("url");
 const Capnp = Npm.require("capnp");
 const Net = Npm.require("net");
@@ -33,6 +34,7 @@ const WebSession = Capnp.importSystem("sandstorm/web-session.capnp").WebSession;
 const HackSession = Capnp.importSystem("sandstorm/hack-session.capnp");
 const Supervisor = Capnp.importSystem("sandstorm/supervisor.capnp").Supervisor;
 const Backend = Capnp.importSystem("sandstorm/backend.capnp").Backend;
+const Powerbox = Capnp.importSystem("sandstorm/powerbox.capnp");
 
 const PARSED_ROOT_URL = Url.parse(process.env.ROOT_URL);
 const PROTOCOL = PARSED_ROOT_URL.protocol;
@@ -128,37 +130,6 @@ function referralProgramLogSharingTokenUse(db, bobAccountId) {
   });
 }
 
-class HeaderWhitelist {
-  constructor(list) {
-    this._headers = {};
-    this._prefixes = [];
-
-    list.forEach(pattern => {
-      if (pattern.endsWith("*")) {
-        this._prefixes.push(pattern.slice(0, -1));
-      } else {
-        this._headers[pattern] = true;
-      }
-    });
-  }
-
-  matches(header) {
-    header = header.toLowerCase();
-    if (this._headers[header]) return true;
-
-    for (const i in this._prefixes) {
-      if (header.startsWith(this._prefixes[i])) {
-        return true;
-      }
-    };
-
-    return false;
-  }
-}
-
-const REQUEST_HEADER_WHITELIST = new HeaderWhitelist(WebSession.Context.headerWhitelist);
-const RESPONSE_HEADER_WHITELIST = new HeaderWhitelist(WebSession.Response.headerWhitelist);
-
 // User-agent strings that should be allowed to use http basic authentication.
 // These are regex matches, so ensure they are escaped properly with double
 // backslashes. For security reasons, we MUST NOT whitelist any user-agents
@@ -230,6 +201,12 @@ Meteor.setInterval(() => {
 
 const proxiesByHostId = {};
 
+function parsePowerboxDescriptorList(list) {
+  return list.map(packedDescriptor =>
+      Capnp.parse(Powerbox.PowerboxDescriptor, new Buffer(packedDescriptor, "base64"),
+                  { packed: true }));
+}
+
 Meteor.methods({
   newGrain(packageId, command, title, identityId) {
     // Create and start a new grain.
@@ -292,13 +269,21 @@ Meteor.methods({
     return grainId;
   },
 
-  openSession(grainId, identityId, cachedSalt) {
+  openSession(grainId, identityId, cachedSalt, options) {
     // Open a new UI session on an existing grain.  Starts the grain if it is not already
     // running.
+
+    options = options || {};
 
     check(grainId, String);
     check(identityId, Match.OneOf(undefined, null, String));
     check(cachedSalt, Match.OneOf(undefined, null, String));
+    check(options, {
+      powerboxRequest: Match.Optional({
+        descriptors: [String],
+        requestingSession: String,
+      }),
+    });
 
     if (this.userId && identityId && !globalDb.userHasIdentity(this.userId, identityId)) {
       throw new Meteor.Error(403, "Current user does not own the identity: " + identityId);
@@ -321,17 +306,30 @@ Meteor.methods({
       throw new Meteor.Error(403, "Unauthorized", "User is not authorized to open this grain.");
     }
 
+    const sessionFields = {};
+    if (options.powerboxRequest) {
+      sessionFields.powerboxRequest = {
+        descriptors: parsePowerboxDescriptorList(options.powerboxRequest.descriptors),
+        requestingSession: options.powerboxRequest.requestingSession,
+      };
+    }
+
     const opened = globalBackend.openSessionInternal(grainId, this.userId, identityId,
-                                                     null, null, cachedSalt);
+                                                     null, null, cachedSalt, sessionFields);
     const result = opened.methodResult;
     const proxy = new Proxy(grain, result.sessionId,
                             result.hostId, result.tabId, identityId, false, null,
                             opened.supervisor);
+
+    if (sessionFields.powerboxRequest) {
+      proxy.powerboxRequest = sessionFields.powerboxRequest;
+    }
+
     proxiesByHostId[result.hostId] = proxy;
     return result;
   },
 
-  openSessionFromApiToken(params, identityId, cachedSalt, neverRedeem, parentOrigin) {
+  openSessionFromApiToken(params, identityId, cachedSalt, neverRedeem, parentOrigin, options) {
     // Given an API token, either opens a new WebSession to the underlying grain or returns a
     // path to which the client should redirect in order to open such a session.
     //
@@ -340,6 +338,7 @@ Meteor.methods({
 
     neverRedeem = neverRedeem || false;
     parentOrigin = parentOrigin || process.env.ROOT_URL;
+    options = options || {};
 
     check(params, {
       token: String,
@@ -349,6 +348,12 @@ Meteor.methods({
     check(cachedSalt, Match.OneOf(undefined, null, String));
     check(neverRedeem, Boolean);
     check(parentOrigin, String);
+    check(options, {
+      powerboxRequest: Match.Optional({
+        descriptors: [String],
+        requestingSession: String,
+      }),
+    });
 
     if (this.userId && identityId && !globalDb.userHasIdentity(this.userId, identityId)) {
       throw new Meteor.Error(403, "Current user does not own the identity: " + identityId);
@@ -425,6 +430,14 @@ Meteor.methods({
                                "User is not authorized to open this grain.");
       }
 
+      const sessionFields = {};
+      if (options.powerboxRequest) {
+        sessionFields.powerboxRequest = {
+          descriptors: parsePowerboxDescriptorList(options.powerboxRequest.descriptors),
+          requestingSession: options.powerboxRequest.requestingSession,
+        };
+      }
+
       // Even in incognito mode, we want to record the user ID on the session. The user ID is not
       // leaked to the app in any way -- it is used to decide what options to show in a powerbox
       // request. Even if the user is incognito, they should be able to offer their full range of
@@ -433,13 +446,17 @@ Meteor.methods({
       // The identity ID passed here IS revealed to the app, but for incognito mode it is always
       // null/undefined.
       const opened = globalBackend.openSessionInternal(apiToken.grainId, this.userId,
-        identityId, title, apiToken, cachedSalt);
+        identityId, title, apiToken, cachedSalt, sessionFields);
 
       const result = opened.methodResult;
       const proxy = new Proxy(grain, result.sessionId,
                               result.hostId, result.tabId, identityId, false, parentOrigin,
                               opened.supervisor);
       proxy.apiToken = apiToken;
+      if (sessionFields.powerboxRequest) {
+        proxy.powerboxRequest = sessionFields.powerboxRequest;
+      }
+
       proxiesByHostId[result.hostId] = proxy;
       return result;
     }
@@ -644,6 +661,10 @@ const getProxyForHostId = (hostId, isAlreadyOpened) => {
         const proxy = new Proxy(grain, session._id, hostId, session.tabId,
                                 session.identityId, false);
         if (apiToken) proxy.apiToken = apiToken;
+
+        if (session.powerboxRequest) {
+          proxy.powerboxRequest = session.powerboxRequest;
+        }
 
         // Only add the proxy to the table if it was not concurrently deleted (which could happen
         // e.g. if the user's access was revoked).
@@ -1440,6 +1461,22 @@ class Proxy {
         });
   }
 
+  _callNewRequestSession(request, userInfo) {
+    const params = Capnp.serialize(WebSession.Params, {
+      basePath: PROTOCOL + "//" + request.headers.host,
+      userAgent: "user-agent" in request.headers
+          ? request.headers["user-agent"]
+          : "UnknownAgent/0.0",
+      acceptableLanguages: "accept-language" in request.headers
+          ? request.headers["accept-language"].split(",").map((s) => { return s.trim(); })
+          : ["en-US", "en"],
+    });
+    return this.uiView.newRequestSession(userInfo,
+         makeHackSessionContext(this.grainId, this.sessionId, this.identityId, this.tabId),
+         WebSession.typeId, params, this.powerboxRequest.descriptors,
+         new Buffer(this.tabId, "hex")).session;
+  }
+
   _callNewSession(request, viewInfo) {
     const userInfo = _.clone(this.userInfo);
     const promise = inMeteor(() => {
@@ -1504,6 +1541,8 @@ class Proxy {
 
       if (this.isApi) {
         return this._callNewApiSession(request, userInfo);
+      } else if (this.powerboxRequest) {
+        return this._callNewRequestSession(request, userInfo);
       } else {
         return this._callNewWebSession(request, userInfo);
       }
@@ -1808,7 +1847,7 @@ class Proxy {
       const redirect = rpcResponse.redirect;
       const redirectCode = redirectCodes[redirect.switchToGet * 2 + redirect.isPermanent];
       response.writeHead(redirectCode.id, redirectCode.title, {
-        "Location": redirect.location,
+        "Location": encodeURI(redirect.location),
       });
       response.end();
     } else if ("clientError" in rpcResponse) {
@@ -2566,7 +2605,6 @@ ResponseStream = class ResponseStream {
 
     if (this.started) {
       throw new Error("can't sendDirectResponse() because response already started");
-      this.response.end();
     } else if (this.ended) {
       throw new Error("can't sendDirectResponse() because response already sent");
     } else {

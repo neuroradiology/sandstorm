@@ -115,6 +115,10 @@ class SandstormBackend {
       throw new Meteor.Error(404, "Grain Not Found", "Grain ID: " + grainId);
     }
 
+    if (grain.trashed) {
+      throw new Meteor.Error(403, "Grain is in the trash bin", "Grain ID: " + grainId);
+    }
+
     // If a DevPackage with the same app ID is currently active, we let it override the installed
     // package, so that the grain runs using the dev app.
     const devPackage = DevPackages.findOne({ appId: grain.appId });
@@ -224,7 +228,7 @@ class SandstormBackend {
     }
   }
 
-  openSessionInternal(grainId, userId, identityId, title, apiToken, cachedSalt) {
+  openSessionInternal(grainId, userId, identityId, title, apiToken, cachedSalt, sessionFields) {
     // Start the grain if it is not running. This is an optimization: if we didn't start it here,
     // it would start on the first request to the session host, but we'd like to get started before
     // the round trip.
@@ -279,6 +283,10 @@ class SandstormBackend {
 
     if (apiToken) {
       session.hashedToken = apiToken._id;
+    }
+
+    if (sessionFields) {
+      _.extend(session, sessionFields);
     }
 
     Sessions.insert(session);

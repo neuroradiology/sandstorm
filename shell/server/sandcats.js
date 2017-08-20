@@ -26,8 +26,15 @@ const Url = Npm.require("url");
 import { SANDSTORM_ALTHOME } from "/imports/server/constants.js";
 
 const SANDCATS_HOSTNAME = (Meteor.settings && Meteor.settings.public &&
-                         Meteor.settings.public.sandcatsHostname);
+                           Meteor.settings.public.sandcatsHostname);
 const SANDCATS_VARDIR = (SANDSTORM_ALTHOME || "") + "/var/sandcats";
+
+// Figure out what IP address to send Sandcats requests from. For machines with multiple IPs, it
+// is important to use the IP to which we're binding. However, some people set BIND_IP to 127.0.0.1
+// and put sniproxy in front of Sandstorm. In those cases, it won't work to send from BIND_IP;
+// we'll have to let the system choose.
+const BIND_IP = process.env.BIND_IP && process.env.BIND_IP.startsWith("127.")
+    ? null : process.env.BIND_IP;
 
 const ROOT_URL = Url.parse(process.env.ROOT_URL);
 const HOSTNAME = ROOT_URL.hostname;
@@ -63,15 +70,27 @@ const pingUdp = () => {
     }
   });
 
-  socket.send(message, 0, message.length, 8080, SANDCATS_HOSTNAME, (err) => {
-    if (err) {
-      console.error("Couldn't send UDP sandcats ping", err);
-    }
+  socket.on("error", (err) => {
+    throw err;
   });
 
-  Meteor.setTimeout(() => {
-    socket.close();
-  }, 10 * 1000);
+  const callback = () => {
+    socket.send(message, 0, message.length, 8080, SANDCATS_HOSTNAME, (err) => {
+      if (err) {
+        console.error("Couldn't send UDP sandcats ping", err);
+      }
+    });
+
+    setTimeout(() => {
+      socket.close();
+    }, 10 * 1000);
+  };
+
+  if (BIND_IP) {
+    socket.bind({ address: BIND_IP }, callback);
+  } else {
+    callback();
+  }
 };
 
 const performSandcatsRequest = (path, hostname, postData, errorCallback, responseCallback) => {
@@ -87,6 +106,10 @@ const performSandcatsRequest = (path, hostname, postData, errorCallback, respons
       "Content-Type": "application/x-www-form-urlencoded",
     },
   };
+
+  if (BIND_IP) {
+    options.localAddress = BIND_IP;
+  }
 
   if (postData.certificateSigningRequest) {
     console.log("Submitting certificate request for host",

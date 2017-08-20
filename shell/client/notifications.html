@@ -86,14 +86,6 @@
       You can help Sandstorm by sending us some anonymous usage stats.
       Click here for more info.
     {{/if}}
-    {{#if isType "cantRenewFeatureKey"}}
-      Error renewing your Sandstorm for Work subscription.
-      Click here to resolve the problem, or Sandstorm for Work features may become unavailable.
-    {{/if}}
-    {{#if isType "trialFeatureKeyExpired"}}
-      Your Sandstorm for Work trial has expired.
-      Click here to upgrade, or Sandstorm for Work features may become unavailable.
-    {{/if}}
 
     <div class="notification-footer">
       <span title="{{timestamp}}" class="notification-timestamp">{{dateString timestamp}}</span>
@@ -122,6 +114,22 @@
       </form>
     </div>
   {{/linkTo}}
+</template>
+
+<template name="identityChangesNotificationItem">
+  <a href="https://sandstorm.io/news/2017-05-08-refactoring-identities" class="notification-item"
+     target="_blank">
+    <div class="notification-icon">
+      <img src="/sandstorm-gradient-logo.svg">
+    </div>
+
+    We're changing the way identities work in Sandstorm. Your account may be affected. Click here
+    to learn more.
+
+    <div class="notification-footer">
+      <span title="{{timestamp}}" class="notification-timestamp">{{dateString timestamp}}</span>
+    </div>
+  </a>
 </template>
 
 <template name="grainActivityNotificationItem">
@@ -166,7 +174,11 @@
   {{#if isOngoing }}
     {{> backgroundedGrainNotificationItem . }}
   {{else}}
+  {{#if isIdentityChanges }}
+    {{> identityChangesNotificationItem . }}
+  {{else}}
     {{> grainActivityNotificationItem . }}
+  {{/if}}
   {{/if}}
   {{/if}}
   {{/if}}

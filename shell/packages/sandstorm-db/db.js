@@ -127,12 +127,7 @@ const collectionOptions = { defineMutationMethods: Meteor.isClient };
 //           experiment. Each experiment may define a point in time where users not already in the
 //           experiment may be added to it and assigned to a group (for example, at user creation
 //           time). Current experiments:
-//       firstTimeBillingPrompt: Value is "control" or "test". Users are assigned to groups at
-//               account creation on servers where billing is enabled (i.e. Oasis). Users in the
-//               test group will see a plan selection dialog and asked to make an explitic choice
-//               (possibly "free") before they can create grains (but not when opening someone
-//               else's shared grain). The goal of the experiment is to determine whether this
-//               prompt scares users away -- and also whether it increases paid signups.
+//       firstTimeBillingPrompt: OBSOLETE
 //       freeGrainLimit: Value is "control" or or a number indicating the grain limit that the
 //               user should receive when on the "free" plan, e.g. "Infinity".
 //   stashedOldUser: A complete copy of this user from before the accounts/identities migration.
@@ -247,6 +242,8 @@ Grains = new Mongo.Collection("grains", collectionOptions);
 //   publicId:  An id used to publicly identify this grain. Used e.g. to route incoming e-mail and
 //       web publishing. This field is initialized when first requested by the app.
 
+Grains.ensureIndexOnServer("cachedViewInfo.matchRequests.tags.id", { sparse: 1 });
+
 RoleAssignments = new Mongo.Collection("roleAssignments", collectionOptions);
 // *OBSOLETE* Before `user` was a variant of ApiTokenOwner, this collection was used to store edges
 // in the permissions sharing graph. This functionality has been subsumed by the ApiTokens
@@ -289,9 +286,24 @@ Sessions = new Mongo.Collection("sessions", collectionOptions);
 //       that was used to open it. Note that for old-style sharing (i.e. when !grain.private),
 //       anonymous users can get access without an API token and so neither userId nor hashedToken
 //       are present.
-//   powerboxView: If present, this is a view that should be presented as part of a powerbox
-//       interaction.
-//     offer: The webkey that corresponds to cap that was passed to the `offer` RPC.
+//   powerboxView: Information about a server-initiated powerbox interaction taking place in this
+//       session. When the client sees a `powerboxView` appear on the session, it opens the
+//       powerbox popup according to the contents. This field is an object containing one of:
+//     offer: A capability is being offered to the user by the app. This is an object containing:
+//       token: For a non-UiView capability, the API token that can be used to restore this
+//           capability.
+//       uiView: A UiView capability. This object contains one of:
+//         tokenId: The _id of an ApiToken belonging to the current user.
+//         token: A full webkey token which can be opened by an anonymous user.
+//     fulfill: A capability is being offered which fulfills the active powerbox request. This
+//         is an object with members:
+//       token: The SturdyRef of the fulfilling capability. This token can only be used in a call
+//           to claimRequest() by the requesting
+//           grain.
+//       descriptor: Packed-base64 PowerboxDescriptor for the capability.
+//   powerboxRequest: If present, this session is a powerbox request session. Object containing:
+//     descriptors: Array of PowerboxDescriptors representing the request.
+//     requestingSession: Session ID of the session initiating the request.
 //   viewInfo: The UiView.ViewInfo corresponding to the underlying UiSession. This isn't populated
 //       until newSession is called on the UiView.
 //   permissions: The permissions for the current identity on this UiView. This isn't populated
@@ -353,6 +365,13 @@ FileTokens = new Mongo.Collection("fileTokens", collectionOptions);
 //   name:      Suggested filename.
 //   timestamp: File creation time. Used to figure out when the token and file should be wiped.
 
+SpkTokens = new Mongo.Collection("spkTokens", collectionOptions);
+// A lot like FileTokens, but for SPK uploads.
+//
+// Each contains:
+//   _id:       The unguessable token string.
+//   timestamp: Creation time. Used to figure out when the token should be wiped.
+
 ApiTokens = new Mongo.Collection("apiTokens", collectionOptions);
 // Access tokens for APIs exported by apps.
 //
@@ -409,6 +428,21 @@ ApiTokens = new Mongo.Collection("apiTokens", collectionOptions);
 //       verifiedEmail: An VerifiedEmail capability that is implemented by the frontend.
 //                      An object containing `verifierId`, `tabId`, and `address`.
 //       identity: An Identity capability. The field is the identity ID.
+//       http: An ApiSession capability pointing to an external HTTP service. Object containing:
+//           url: Base URL of the external service.
+//           auth: Authentication mechanism. Object containing one of:
+//               none: Value "null". Indicates no authorization.
+//               bearer: A bearer token to pass in the `Authorization: Bearer` header on all
+//                   requests. Encrypted with nonce 0.
+//               basic: A `{username, password}` object. The password is encrypted with nonce 0.
+//                   Before encryption, the password is padded to 32 bytes by appending NUL bytes,
+//                   in order to mask the length of small passwords.
+//               refresh: An OAuth refresh token, which can be exchanged for an access token.
+//                   Encrypted with nonce 0.
+//               TODO(security): How do we protect URLs that directly embed their secret? We don't
+//                   want to encrypt the full URL since this would make it hard to show a
+//                   meaningful audit UI, but maybe we could figure out a way to extract the key
+//                   part and encrypt it separately?
 //   parentToken: If present, then this token represents exactly the capability represented by
 //              the ApiToken with _id = parentToken, except possibly (if it is a UiView) attenuated
 //              by `roleAssignment` (if present). To facilitate permissions computations, if the
@@ -416,6 +450,11 @@ ApiTokens = new Mongo.Collection("apiTokens", collectionOptions);
 //              is set to the identity that shared the view, and `accountId` is set to the account
 //              that shared the view. Neither `objectId` nor `frontendRef` is present when
 //              `parentToken` is present.
+//   parentTokenKey: The actual parent token -- whereas `parentToken` is only the parent token ID
+//              (hash). `parentTokenFull` is encrypted with nonce 0 (see below). This is needed
+//              in particular when the parent contains encrypted fields, since those would need to
+//              be decrypted using this key. If the parent contains no encrypted fields then
+//              `parentTokenKey` may be omitted from the child.
 //   petname:   Human-readable label for this access token, useful for identifying tokens for
 //              revocation. This should be displayed when visualizing incoming capabilities to
 //              the grain identified by `grainId`.
@@ -475,6 +514,15 @@ ApiTokens = new Mongo.Collection("apiTokens", collectionOptions);
 //         address :Text;
 //       }
 //       identity :Text;
+//       http :group {
+//         url :Text;
+//         auth :union {
+//           none :Void;
+//           bearer :Text;
+//           basic :group { username :Text; password :Text; }
+//           refresh :Text;
+//         }
+//       }
 //     }
 //     child :group {
 //       parentToken :Text;
@@ -491,6 +539,37 @@ ApiTokens = new Mongo.Collection("apiTokens", collectionOptions);
 //   requirements: List(Supervisor.MembraneRequirement);
 //   ...
 // }
+//
+// ENCRYPTION
+//
+// We want to make sure that someone who obtains a copy of the database cannot use it to gain live
+// credentials.
+//
+// The actual token corresponding to an ApiToken entry is not stored in the entry itself. Instead,
+// the ApiToken's `_id` is constructed as a SHA256 hash of the actual token. To use an ApiToken
+// in the live system, you must present the original token.
+//
+// Additionally, some ApiToken entries contain tokens to third-party services, e.g. OAuth tokens
+// or even passwords. Such tokens are encrypted, using the ApiToken entry's own full token (which,
+// again, is not stored in the database) as the encryption key.
+//
+// When such encryption is applied, the cipher used is ChaCha20. All API tokens are 256-bit base64
+// strings, hence can be used directly as the key. No MAC is applied, because this scheme is not
+// intended to protect against attackers who have write access to the database -- such an attacker
+// could almost certainly do more damage by modifying the non-encrypted fields anyway. (Put another
+// way, if we wanted to MAC something, we'd need to MAC the entire ApiToken structure, not just
+// the encrypted key. But we don't have a way to do that at present.)
+//
+// ChaCha20 requires a nonce. Luckily, all of the fields we wish to encrypt are immutable, so we
+// don't have to worry about tracking nonces over time -- we can just assign a static nonce to each
+// field. Moreover, many (currently, all) of these fields are mutually exclusive, so can even share
+// nonces. Currently, nonces map to fields as follows:
+//
+// nonce 0:
+//     parentTokenKey
+//     frontendRef.http.auth.basic.password
+//     frontendRef.http.auth.bearer
+//     frontendRef.http.auth.refresh
 
 ApiTokens.ensureIndexOnServer("grainId", { sparse: 1 });
 ApiTokens.ensureIndexOnServer("owner.user.identityId", { sparse: 1 });
@@ -545,8 +624,7 @@ Notifications = new Mongo.Collection("notifications", collectionOptions);
 //   admin:        If present, this is a notification intended for an admin.
 //     action:     If present, this is a (string) link that the notification should direct the
 //                 admin to.
-//     type:       The type of notification -- can be "reportStats", "cantRenewFeatureKey", or
-//                 "trialFeatureKeyExpired".
+//     type:       The type of notification -- currently can only be "reportStats".
 //   appUpdates:   If present, this is an app update notification. It is an object with the appIds
 //                 as keys.
 //     $appId:     The appId that has an outstanding update.
@@ -559,6 +637,8 @@ Notifications = new Mongo.Collection("notifications", collectionOptions);
 //   mailingListBonus: Like `referral`, but notify the user about the mailing list bonus. This is
 //                 a one-time notification only to Oasis users who existed when the bonus program
 //                 was implemented.
+//   identityChanges: If this boolean field is true, this notification should show a warning about
+//                 upcoming changes to the identity model.
 
 ActivitySubscriptions = new Mongo.Collection("activitySubscriptions", collectionOptions);
 // Activity events to which a user is subscribed.
@@ -693,27 +773,9 @@ KeybaseProfiles = new Mongo.Collection("keybaseProfiles", collectionOptions);
 //       for now and we just trust Keybase.
 
 FeatureKey = new Mongo.Collection("featureKey", collectionOptions);
-// Responsible for storing the current feature key that is active on the server.  Contains a single
-// document with two keys:
-//
-//   _id: "currentFeatureKey"
-//   value: the still-signed, binary-encoded feature key
-//          (a feature key with comments removed and base64 decoded)
-//   renewalProblem: If we tried to renew this feature key and failed, an object describing that
-//       failure. Includes exactly one of the following fields:
-//     noPaymentSource: True, indicating that the key could not be renewed because there was no
-//         payment source set for this key.
-//     paymentFailed: String error message returned by our payment processor describing why they
-//         declined the charge.
-//     noSuchKey: True, indicating the key doesn't exist.
-//     revoked: True, indicating the key has been revoked.
-//     unknownResponse: String response text from the renewal API which wasn't recognized. Should
-//         be reported to Sandstorm.
-//     exception: String error message from an exception thrown by the renewal code. This usually
-//         indicates some sort of connectivity problem, so could be reported to the user as:
-//         "There was a problem reaching the feature key renewal server."
-//
-// This is only intended to be visible on the server.
+// OBSOLETE: This was used to implement the Sandstorm for Work paywall, which has been removed.
+//   Collection object still defined because it could have old data in it, for servers that used
+//   to have a feature key.
 
 SetupSession = new Mongo.Collection("setupSession", collectionOptions);
 // Responsible for storing information about setup sessions.  Contains a single document with three
@@ -992,6 +1054,7 @@ SandstormDb = function (quotaManager) {
     activityStats: ActivityStats,
     deleteStats: DeleteStats,
     fileTokens: FileTokens,
+    spkTokens: SpkTokens,
     apiTokens: ApiTokens,
     apiHosts: ApiHosts,
     notifications: Notifications,
@@ -1005,7 +1068,6 @@ SandstormDb = function (quotaManager) {
     plans: Plans,
     appIndex: AppIndex,
     keybaseProfiles: KeybaseProfiles,
-    featureKey: FeatureKey,
     setupSession: SetupSession,
     desktopNotifications: DesktopNotifications,
     standaloneDomains: StandaloneDomains,
@@ -1112,8 +1174,17 @@ _.extend(SandstormDb.prototype, {
     const ldapEnabled = orgMembership && orgMembership.ldap && orgMembership.ldap.enabled;
     const samlEnabled = orgMembership && orgMembership.saml && orgMembership.saml.enabled;
     if (emailEnabled && emailDomain && identity.services.email) {
-      if (identity.services.email.email.toLowerCase().split("@").pop() === emailDomain) {
-        return true;
+      const domainSuffixes = emailDomain.split(/\s*,\s*/);
+      for (let i = 0; i < domainSuffixes.length; i++) {
+        const suffix = domainSuffixes[i];
+        const domain = identity.services.email.email.toLowerCase().split("@").pop();
+        if (suffix.startsWith("*.")) {
+          if (domain.endsWith(suffix.substr(1))) {
+            return true;
+          }
+        } else if (domain === suffix) {
+          return true;
+        }
       }
     } else if (ldapEnabled && identity.services.ldap) {
       return true;
@@ -1129,10 +1200,6 @@ _.extend(SandstormDb.prototype, {
   },
 
   isUserInOrganization(user) {
-    if (!this.isFeatureKeyValid()) {
-      return false;
-    }
-
     for (let i = 0; i < user.loginIdentities.length; i++) {
       let identity = Meteor.users.findOne({ _id: user.loginIdentities[i].id });
       if (this.isIdentityInOrganization(identity)) {
@@ -1157,6 +1224,10 @@ if (Meteor.isServer) {
         const hash2 = Crypto.createHash("sha256").update(token._id).digest("base64");
         this.collections.apiHosts.remove({ hash2: hash2 });
       }
+
+      // TODO(soon): Drop remote OAuth tokens for frontendRef.http. Unfortunately the way to do
+      //   this is different for every service. :( Also we may need to clarify with the "bearer"
+      //   type whether or not the token is "owned" by us...
     });
 
     this.collections.apiTokens.remove(query);
@@ -1450,9 +1521,11 @@ _.extend(SandstormDb.prototype, {
 
     // First remove any instances of characters that cause trouble for SimpleSmtp. Ideally,
     // we could escape such characters with a backslash, but that does not seem to help here.
+    // TODO(cleanup): Unclear whether this sanitization is still necessary now that we return a
+    //   structured object and have moved to nodemailer. I'm not touching it for now.
     const sanitized = displayName.replace(/"|<|>|\\|\r/g, "");
 
-    return "\"" + sanitized + "\" <" + this.getReturnAddress() + ">";
+    return { name: sanitized, address: this.getReturnAddress() };
   },
 
   getPrimaryEmail(accountId, identityId) {
@@ -1497,22 +1570,6 @@ _.extend(SandstormDb.prototype, {
           "limits each user to " + DAILY_LIMIT + " e-mails per day for spam control reasons. " +
           "Please feel free to contact us if this is a problem.");
     }
-  },
-
-  isFeatureKeyValid() {
-    const featureKey = this.currentFeatureKey();
-    return !!featureKey;
-  },
-
-  isFeatureKeyValidAndNotExpired() {
-    const featureKey = this.currentFeatureKey();
-    return featureKey && (parseInt(featureKey.expires) > (Date.now() / 1000));
-  },
-
-  isFeatureKeyOptedIntoStats() {
-    const featureKey = this.currentFeatureKey();
-    return featureKey && featureKey.isTrial && parseInt(featureKey.issued) > 1472601600;
-    // 1472601600 is 2016 Aug 31 in seconds since the epoch
   },
 
   getLdapUrl() {
@@ -1607,7 +1664,7 @@ _.extend(SandstormDb.prototype, {
   },
 
   getOrganizationDisallowGuests() {
-    return this.getOrganizationDisallowGuestsRaw() && this.isFeatureKeyValid();
+    return this.getOrganizationDisallowGuestsRaw();
   },
 
   getOrganizationDisallowGuestsRaw() {
@@ -1616,7 +1673,7 @@ _.extend(SandstormDb.prototype, {
   },
 
   getOrganizationShareContacts() {
-    return this.getOrganizationShareContactsRaw() && this.isFeatureKeyValid();
+    return this.getOrganizationShareContactsRaw();
   },
 
   getOrganizationShareContactsRaw() {
@@ -1922,19 +1979,19 @@ _.extend(SandstormDb.prototype, {
 
   isHideAboutEnabled() {
     const setting = this.collections.settings.findOne({ _id: "whiteLabelHideAbout" });
-    return setting && setting.value && this.isFeatureKeyValid();
+    return setting && setting.value;
   },
 
   isQuotaEnabled() {
     if (Meteor.settings.public.quotaEnabled) return true;
 
     const setting = this.collections.settings.findOne({ _id: "quotaEnabled" });
-    return setting && setting.value && this.isFeatureKeyValid();
+    return setting && setting.value;
   },
 
   isQuotaLdapEnabled() {
     const setting = this.collections.settings.findOne({ _id: "quotaLdapEnabled" });
-    return setting && setting.value && this.isFeatureKeyValid();
+    return setting && setting.value;
   },
 
   updateUserQuota(user) {
@@ -2462,6 +2519,7 @@ if (Meteor.isServer) {
         if (user && user.experiments) {
           record.experiments = user.experiments;
         }
+
         this.collections.deleteStats.insert(record);
       }
 
@@ -2803,63 +2861,6 @@ if (Meteor.isServer) {
 
     this.ready();
   });
-}
-
-const processRawFeatureKey = function (featureKey, renewalProblem) {
-  // Maps the raw data of a signed feature key to the desired "effective" feature key we should use
-  // to govern high-level behavior.
-  const processedFeatureKey = _.clone(featureKey);
-
-  if (renewalProblem) {
-    processedFeatureKey.renewalProblem = renewalProblem;
-  }
-
-  // Hook for future extensibility.
-  return processedFeatureKey;
-};
-
-if (Meteor.isServer) {
-  const processFeatureKeyDoc = doc => {
-    if (!doc) return null;
-    const buf = new Buffer(doc.value);
-    // We use loadSignedFeatureKey from server/feature-key.js.  This should probably get refactored
-    // once we can use ES6 modules.
-    const rawFeatureKey = loadSignedFeatureKey(buf);
-    return processRawFeatureKey(rawFeatureKey, doc.renewalProblem);
-  };
-
-  SandstormDb.prototype.currentFeatureKey = function () {
-    // Returns an object with all of the current signed feature key properties,
-    // or null, if the feature key is missing or not correctly signed.
-    const doc = this.collections.featureKey.findOne({ _id: "currentFeatureKey" });
-    return processFeatureKeyDoc(doc);
-  };
-
-  SandstormDb.prototype.observeFeatureKey = function (callback) {
-    // Calls `callback(currentFeatureKey())` whenever the feature key changes. Returns an observe
-    // handle (use .stop() to stop observing).
-
-    return this.collections.featureKey.find({ _id: "currentFeatureKey" }).observe({
-      added(doc) {
-        callback(processFeatureKeyDoc(doc));
-      },
-
-      changed(newDoc, oldDoc) {
-        if (newDoc.value !== oldDoc.value) {
-          callback(processFeatureKeyDoc(newDoc));
-        }
-      },
-
-      removed() {
-        callback(null);
-      },
-    });
-  };
-} else {
-  SandstormDb.prototype.currentFeatureKey = function () {
-    const featureKey = this.collections.featureKey.findOne({ _id: "currentFeatureKey" });
-    return processRawFeatureKey(featureKey);
-  };
 }
 
 if (Meteor.isServer) {

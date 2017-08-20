@@ -34,6 +34,7 @@ NODEJS=$(METEOR_DEV_BUNDLE)/bin/node
 NODE_HEADERS=$(METEOR_DEV_BUNDLE)/include/node
 WARNINGS=-Wall -Wextra -Wglobal-constructors -Wno-sign-compare -Wno-unused-parameter
 CXXFLAGS2=-std=c++1y $(WARNINGS) $(CXXFLAGS) -DSANDSTORM_BUILD=$(BUILD) -pthread -fPIC -I$(NODE_HEADERS)
+CFLAGS2=$(CFLAGS) -pthread -fPIC
 LIBS=-pthread
 
 define color
@@ -149,8 +150,8 @@ update: sandstorm-$(BUILD)-fast.tar.xz
 
 fast: sandstorm-$(BUILD)-fast.tar.xz
 
-test: sandstorm-$(BUILD)-fast.tar.xz
-	tests/run-local.sh sandstorm-$(BUILD)-fast.tar.xz
+test: sandstorm-$(BUILD)-fast.tar.xz test-app.spk
+	tests/run-local.sh sandstorm-$(BUILD)-fast.tar.xz test-app.spk
 
 installer-test:
 	(cd installer-tests && bash prepare-for-tests.sh && PYTHONUNBUFFERED=yes TERM=xterm SLOW_TEXT_TIMEOUT=120 ~/.local/bin/stodgy-tester --plugin stodgy_tester.plugins.sandstorm_installer_tests --on-vm-start=uninstall_sandstorm --rsync)
@@ -254,13 +255,13 @@ tmp/ekam-bin: tmp/.deps
 
 tmp/.ekam-run: tmp/ekam-bin src/sandstorm/* tmp/.deps
 	@$(call color,building sandstorm with ekam)
-	@CC="$(CC)" CXX="$(CXX)" CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS2)" \
+	@CC="$(CC)" CXX="$(CXX)" CFLAGS="$(CFLAGS2)" CXXFLAGS="$(CXXFLAGS2)" \
 	    LIBS="$(LIBS)" NODEJS=$(NODEJS) tmp/ekam-bin -j$(PARALLEL) || \
 	    ($(call color,build failed. You might need to: make update-deps) && false)
 	@touch tmp/.ekam-run
 
 continuous:
-	@CC="$(CC)" CXX="$(CXX)" CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS2)" \
+	@CC="$(CC)" CXX="$(CXX)" CFLAGS="$(CFLAGS2)" CXXFLAGS="$(CXXFLAGS2)" \
 	    LIBS="$(LIBS)" NODEJS=$(NODEJS) ekam -j$(PARALLEL) -c -n :41315 || \
 	    ($(call color,You probably need to install ekam and put it on your path; see github.com/sandstorm-io/ekam) && false)
 
@@ -378,7 +379,7 @@ sandstorm-$(BUILD)-fast.tar.xz: bundle
 # ====================================================================
 # app-index.spk
 
-# This is currently really really hacky because spk is not good at using package definition file
+# This is currently really really hacky because spk is not good at using a package definition file
 # that is not located at the root of the source tree. In particular it is hard for the package
 # definition file (living in the src tree) to refer to the `app-index` binary (living in the
 # tmp tree).
@@ -394,3 +395,23 @@ app-index-dev: tmp/.ekam-run
 	@cp src/sandstorm/app-index/app-index.capnp tmp/sandstorm/app-index/app-index.capnp
 	@cp src/sandstorm/app-index/review.html tmp/sandstorm/app-index/review.html
 	spk dev -Isrc -Itmp -ptmp/sandstorm/app-index/app-index.capnp:pkgdef
+
+# ====================================================================
+# test-app.spk
+
+# This is currently really really hacky because spk is not good at using a package definition file
+# that is not located at the root of the source tree. In particular it is hard for the package
+# definition file (living in the src tree) to refer to the `test-app` binary (living in the
+# tmp tree).
+#
+# TODO(cleanup): Make spk better so that it can handle this.
+
+test-app.spk: tmp/.ekam-run
+	@cp src/sandstorm/test-app/test-app.capnp tmp/sandstorm/test-app/test-app.capnp
+	@cp src/sandstorm/test-app/*.html tmp/sandstorm/test-app
+	bin/spk pack -ksrc/sandstorm/test-app/test-app.key -Isrc -Itmp -ptmp/sandstorm/test-app/test-app.capnp:pkgdef test-app.spk
+
+test-app-dev: tmp/.ekam-run
+	@cp src/sandstorm/test-app/test-app.capnp tmp/sandstorm/test-app/test-app.capnp
+	@cp src/sandstorm/test-app/*.html tmp/sandstorm/test-app
+	spk dev -Isrc -Itmp -ptmp/sandstorm/test-app/test-app.capnp:pkgdef

@@ -1,11 +1,5 @@
 /* global Settings */
 
-Template.newAdminIdentity.helpers({
-  hasFeatureKey() {
-    return globalDb.isFeatureKeyValid();
-  },
-});
-
 const idpData = function (configureCallback) {
   const emailTokenEnabled = globalDb.getSettingWithFallback("emailToken", false);
   const googleSetting = globalDb.collections.settings.findOne("google");
@@ -52,7 +46,6 @@ const idpData = function (configureCallback) {
       label: "LDAP",
       icon: "/ldap.svg", // Or use identicons
       enabled: ldapEnabled,
-      restricted: true,
       popupTemplate: "adminIdentityProviderConfigureLdap",
       onConfigure() {
         configureCallback("ldap");
@@ -63,7 +56,6 @@ const idpData = function (configureCallback) {
       label: "SAML",
       icon: "/ldap.svg", // Or use identicons
       enabled: samlEnabled,
-      restricted: true,
       popupTemplate: "adminIdentityProviderConfigureSaml",
       onConfigure() {
         configureCallback("saml");
@@ -111,22 +103,6 @@ Template.adminIdentityRow.events({
   "click button.configure-idp"() {
     const instance = Template.instance();
     instance.data.idp.onConfigure();
-  },
-
-  "click button.get-feature-key"() {
-    const instance = Template.instance();
-    const route = instance.data.featureKeyRoute;
-    if (route) {
-      Router.go(instance.data.featureKeyRoute);
-    }
-  },
-});
-
-Template.adminIdentityRow.helpers({
-  needsFeatureKey() {
-    const instance = Template.instance();
-    const featureKeyValid = globalDb.isFeatureKeyValid();
-    return instance.data.idp.restricted && !featureKeyValid;
   },
 });
 
@@ -201,7 +177,7 @@ Template.googleLoginSetupInstructions.helpers({
 
 // Google form.
 Template.adminIdentityProviderConfigureGoogle.onCreated(function () {
-  const configurations = Package["service-configuration"].ServiceConfiguration.configurations;
+  const configurations = ServiceConfiguration.configurations;
   const googleConfiguration = configurations.findOne({ service: "google" });
   const clientId = (googleConfiguration && googleConfiguration.clientId) || "";
   const clientSecret = (googleConfiguration && googleConfiguration.secret) || "";
@@ -307,7 +283,7 @@ Template.githubLoginSetupInstructions.helpers({
 
 // GitHub form.
 Template.adminIdentityProviderConfigureGitHub.onCreated(function () {
-  const configurations = Package["service-configuration"].ServiceConfiguration.configurations;
+  const configurations = ServiceConfiguration.configurations;
   const githubConfiguration = configurations.findOne({ service: "github" });
   const clientId = (githubConfiguration && githubConfiguration.clientId) || "";
   const clientSecret = (githubConfiguration && githubConfiguration.secret) || "";

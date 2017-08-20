@@ -123,7 +123,6 @@ bool BackupMain::run(kj::StringPtr grainDir) {
   if (sandboxUid == nullptr) {
     uid_t uid = getuid();
     gid_t gid = getgid();
-    KJ_REQUIRE(uid != 0);
 
     KJ_SYSCALL(unshare(CLONE_NEWUSER | CLONE_NEWNS |
         // Unshare other stuff; like no_new_privs, this is only to defend against hypothetical
@@ -145,21 +144,25 @@ bool BackupMain::run(kj::StringPtr grainDir) {
   // are undocumented.  :(
   KJ_SYSCALL(mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr));
 
-  // Mount root read-only.
-  bind(kj::str(root, "/"), "/tmp", MS_BIND | MS_NOSUID | MS_RDONLY);
+  // Create tmpfs root to whitelist directories that we want to bind in.
+  KJ_SYSCALL(mount("tmpfs", "/tmp", "tmpfs", 0, "size=8m,nr_inodes=128,mode=755"));
 
-  if (access("/tmp/dev/null", F_OK) != 0) {
-    // Looks like we need to bind in /dev.
-    KJ_SYSCALL(mount("/dev", "/tmp/dev", nullptr, MS_BIND, nullptr));
+  // Bind in whitelisted directories.
+  const char* WHITELIST[] = { "dev", "bin", "lib", "lib64", "usr" };
+  for (const char* dir: WHITELIST) {
+    auto src = kj::str(root, "/", dir);
+    auto dst = kj::str("/tmp/", dir);
+    if (access(src.cStr(), F_OK) == 0) {
+      KJ_SYSCALL(mkdir(dst.cStr(), 0755));
+      bind(src, dst, MS_BIND | MS_NOSUID | MS_RDONLY);
+    }
   }
 
-  // Hide sensitive directories.
-  KJ_SYSCALL(mount("tmpfs", "/tmp/proc", "tmpfs", 0, "size=32k,nr_inodes=8,mode=000"));
-  KJ_SYSCALL(mount("tmpfs", "/tmp/var", "tmpfs", 0, "size=32k,nr_inodes=8,mode=000"));
-  KJ_SYSCALL(mount("tmpfs", "/tmp/etc", "tmpfs", 0, "size=32k,nr_inodes=8,mode=000"));
-
-  // Mount inner tmpfs.
-  KJ_SYSCALL(mount("tmpfs", "/tmp/tmp", "tmpfs", 0, "size=8m,nr_inodes=128,mode=777"));
+  // Make sandboxed /tmp.
+  KJ_SYSCALL(mkdir("/tmp/tmp", 0777));
+  KJ_IF_MAYBE(u, sandboxUid) {
+    KJ_SYSCALL(chown("/tmp/tmp", *u, 0));
+  }
 
   // Bind in the grain's `data` (=`sandbox`).
   KJ_SYSCALL(mkdir("/tmp/tmp/data", 0777));
@@ -252,23 +255,23 @@ void BackupMain::pump(kj::InputStream& in, kj::OutputStream& out) {
 }
 
 bool BackupMain::findFilesToZip(kj::StringPtr path, kj::OutputStream& out) {
+  // If the path contains a newline, we cannot correctly pass it to `zip` since `zip` expects
+  // one file per line. For security reasons, we must detect and filter out these files.
+  // Hopefully this never happens legitimately?
+  if (path.findFirst('\n') != nullptr) {
+    KJ_LOG(ERROR, "tried to backup file containing newlines", path);
+    return false;
+  }
+
   struct stat stats;
   KJ_SYSCALL(lstat(path.cStr(), &stats));
   if (S_ISREG(stats.st_mode) || S_ISLNK(stats.st_mode)) {
     // Regular file or link can be zipped; write to file stream.
-    // If the path contains a newline, we cannot correctly pass it to `zip` since `zip` expects
-    // one file per line. For security reasons, we must detect and filter out these files.
-    // Hopefully this never happens legitimately?
-    if (path.findFirst('\n') == nullptr) {
-      kj::ArrayPtr<const byte> pieces[2];
-      pieces[0] = path.asBytes();
-      pieces[1] = kj::StringPtr("\n").asBytes();
-      out.write(pieces);
-      return true;
-    } else {
-      KJ_LOG(ERROR, "tried to backup file containing newlines", path);
-      return false;
-    }
+    kj::ArrayPtr<const byte> pieces[2];
+    pieces[0] = path.asBytes();
+    pieces[1] = kj::StringPtr("\n").asBytes();
+    out.write(pieces);
+    return true;
   } else if (S_ISDIR(stats.st_mode)) {
     // Subdirectory; enumerate contents.
     bool packedAny = false;

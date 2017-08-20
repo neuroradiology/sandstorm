@@ -1,3 +1,73 @@
+### v0.212 (2017-08-12) [bugfixes]
+- Updated dependencies to latest versions (as for every release). No other changes.
+
+### v0.211 (2017-07-15) [bugfixes]
+- Removed long-obsolete code in sandbox setup which attempted to enable transparent network proxying. The code never really worked and no app ever used it, but it recently started failing for one of our users.
+
+### v0.210 (2017-06-17) [bugfixes]
+- Powerbox HTTP APIs can now use the `ETag`, `If-Match`, and `If-None-Match` headers, as well as HTTP response codes 304 (not modified) and 412 (precondition failed).
+
+### v0.209 (2017-06-10) [bugfixes]
+- Powerbox HTTP APIs can now send and receive headers prefixed with `X-Sandstorm-App-` and other "whitelisted" headers.
+- sandstorm-http-bridge now sets the environment variable `no_proxy=localhost,127.0.01` in order to avoid breaking apps that make localhost/loopback requests. Such apps may have been broken by the earlier introduction of `http_proxy` in version 0.200 (but would only be affected if the package was rebuilt since then).
+- Updated Meteor to 1.5.
+
+### v0.208 (2017-05-20) [bugfixes]
+- Sent a one-time bell menu notification and added a note on the account settings page notifying affected users of [our upcoming changes to the identity system](https://sandstorm.io/news/2017-05-08-refactoring-identities).
+
+### v0.207 (2017-04-29) [bugfixes]
+- Improved handling of powerbox HTTP APIs, including correctly returning HTTP error bodies.
+- The contact chooser powerbox (e.g. as used by Wekan when adding people to a board or a card) now respects the "Make all organization users visible to each other" setting.
+- Fixed some server-side memory leaks, which might fix the occasional-100%-CPU bug.
+- Fixed bug where trashed grains could be started by trying to use capabilities they serve.
+
+### v0.206 (2017-04-09) [bugfixes]
+- Worked around MacOS Safari bug breaking WebSockets.
+- Oasis: Removed experiment that caused 50% of users to see a plan-chooser prompt immediately upon creating their account. All users will now default to the free plan without having to choose it explicitly. (Showing the plan chooser did not appear to make any more people choose a paid plan.)
+
+### v0.205 (2017-03-18) [bugfixes]
+- Fixed grain backups not working under "privileged" sandbox (which is the default for most newer self-hosted Sandstorm installs).
+- Fixed SAML integration with Azure Active Directory when users are not Microsoft accounts.
+
+### v0.204 (2017-03-05) [bugfixes]
+- Removed stray console logging on e-mail send.
+
+### v0.203 (2017-03-02)
+- Fixed security issues discovered during security review by [DevCore Inc.](http://devco.re/), commissioned by Department of Cyber Security of Taiwan. See blog post coming soon.
+- Apps may now request access via the Powerbox to HTTP resources external to Sandstorm, in the same way that they request access to HTTP resources hosted by other apps. Credentials -- including basic auth passwords and OAuth tokens -- are stored and protected by Sandstorm, not the app.
+- An e-mail organization can now be defined by multiple domains, including wildcard subdomains.
+
+### v0.202 (2017-02-04)
+- Removed Sandstorm for Work paywall. All Sandstorm for Work features are now available on all servers for free. Feature keys are no longer needed and all code related to them has been removed.
+- `sandstorm-http-bridge-internal.capnp` is no longer included with the other, public `.capnp` files in the package. This file was not intended to be used by third parties, and indeed did not parse correctly after installation since it references other files that are not installed. This caused some dev tools to report spurious errors.
+
+### v0.201 (2017-02-03) [bugfixes]
+- Sandcats: Fixed bug where if `BIND_IP` was set to 127.0.0.1 (which it often is for servers that sit behind sniproxy), Sandcats requests would fail, eventually leading to certificate expiration.
+
+### v0.200 (2017-01-28)
+- Added the ability for http-bridge-based apps to publish and request HTTP APIs via the Powerbox without the application needing to understand Cap'n Proto. On the publishing side, an app can declare a list of APIs that it implements in its bridge config. On the requesting side, sandstorm-http-bridge now automatically sets up an HTTP proxy through which the app can redeem powerbox request tokens and make HTTP requests to the remote APIs. Later, this proxy will be extended to support communicating via HTTP to the outside world (with proper permissions checks) and utilizing Sandstorm Cap'n Proto APIs without Cap'n Proto (using JSON instead).
+- Apps can now request IP networking interfaces with TLS encryption support handled by Sandstorm (relying on Sandstorm's certificate bundle, so that the app doesn't need its own).
+- Fixed bug where, when "Disallow collaboration with users outside the organization." is enabled and a user visits a sharing link without logging in, the page doesn't render correctly, leaving the user confused.
+- SAML login now works with non-password-based authentication in ADFS (e.g. Kerberos / Windows login). Apparently, the SAML code was unnecessarily demanding password login previously. We're not sure why the protocol even lets it do that.
+- sandstorm-http-bridge apps can now utilize Cap'n Proto APIs before they begin accepting HTTP connections. Previously, sandstorm-http-bridge would not start accepting connections on its Cap'n Proto API until the app started accepting connections via HTTP.
+- Sandcats: On machines with multiple IP addresses, Sandcats now makes sure that dynamic DNS ends up pointing to the address specified by `BIND_IP`.
+
+### v0.199 (2017-01-07)
+- App-to-app powerbox is now implemented. A grain can advertise that it is able to serve powerbox requests of a certain type. Powerbox queries for that type will show the grain. When selected, the grain will be able to display a picker / configuring UI embedded directly inside the Powerbox. Currently, only raw-Cap'n-Proto-API apps can take advantage of this, but we'll be adding HTTP bridge support soon.
+- Implemented log rotation: When grain debug logs or the system log grow large, older logs will now be automatically discarded. This should fix long-running grains which "mysteriously" appear much larger than they should be.
+- Fixed URL-encoding of `Location` header in HTTP responses.
+- Increased e-mail token timeout and admin token timeout to 1 hour.
+
+### v0.198 (2016-12-17) [bugfixes]
+- Fixed obscure bug where an auto-downloaded app update could be uninstalled before the user gets around to accepting the update.
+- Oasis: Redesigned demo intro.
+
+### v0.197 (2016-12-03) [bugfixes]
+- Self-hosting: Fixed grain backup/restore on non-root installs (unusual configuration).
+- Self-hosting: Fixed spurious "rootUrl is not valid" when using Internet Explorer.
+- Self-hosting: Improved setup wizard intro page to show feature comparison between standard version and Sandstorm for Work.
+- Sandstorm for Work: Fix LDAP-based quota display.
+
 ### v0.196 (2016-11-19) [bugfixes]
 - Fixed web publishing for URLs containing %-escaped characters, e.g. spaces.
 - Fixed problem where notifications were available but opening the notifications menu reported "no notifications".

@@ -162,6 +162,11 @@ Template.notificationItem.helpers({
     const data = Template.currentData();
     return !!data.ongoing;
   },
+
+  isIdentityChanges() {
+    const data = Template.currentData();
+    return !!data.identityChanges;
+  },
 });
 
 Template.appUpdateNotificationItem.helpers({
@@ -249,6 +254,12 @@ Template.referralNotificationItem.events({
   },
 });
 
+Template.identityChangesNotificationItem.events({
+  "click .notification-item"(evt) {
+    Meteor.call("dismissNotification", this._id);
+  },
+});
+
 Template.adminNotificationItem.helpers({
   isType(type) {
     return this.admin.type === type;
@@ -259,7 +270,9 @@ Template.adminNotificationItem.helpers({
   },
 
   isUrgent() {
-    const map = { cantRenewFeatureKey: true, trialFeatureKeyExpired: true };
+    // There used to be urgent notifications, but currently there are none. Maybe there will be
+    // new ones in the future, though?
+    const map = { /* someTypeName: true */ };
     return map[this.admin.type];
   },
 });

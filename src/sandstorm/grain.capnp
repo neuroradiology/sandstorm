@@ -143,6 +143,13 @@ interface UiView @0xdbb4d798ea67e2e7 {
   # sheet.  To accomplish this, the app would create an alternate UiView object that implements
   # an interface just to those cells, and then would use `UiSession.offer()` to offer this object
   # to the user.  The user could then choose to open it, share it, save it for later, etc.
+  #
+  # TODO(apibump): Parameterize UiView on:
+  # - A struct type representing permissions, which must have only boolean fields, each annotated
+  #   with a PermissionDef. Replace all istances of PermissionSet with this.
+  # - An enum type representing roles, each annotated with its permission set and a RoleDef.
+  #   (Requires Cap'n Proto changes to allow parametirizing on enum types, I guess...)
+  # - An enum type representing activity event types, each annotated with an ActivityTypeDef.
 
   getViewInfo @0 () -> ViewInfo;
   # Get metadata about the view, especially relating to sharing.
@@ -613,7 +620,7 @@ struct GrainInfo {
 # ========================================================================================
 # Persistent objects
 
-interface AppPersistent(AppObjectId) {
+interface AppPersistent @0xaffa789add8747b8 (AppObjectId) {
   # To make an object implemented by your own app persistent, implement this interface.
   #
   # `AppObjectId` is a structure like a URL which identifies a specific object within your app.
@@ -648,6 +655,10 @@ interface AppPersistent(AppObjectId) {
   # canonicalization rules) so that it can recognize when the same object is saved multiple times.
   # `MainView.drop()` will be called when all such references have been dropped by their respective
   # clients.
+  #
+  # TODO(cleanup): How does `label` here relate to `PowerboxDisplayInfo` on `offer()` and
+  #   `fulfillRequest()`? Maybe `label` here should actually be `PowerboxDisplayInfo` and those
+  #   other methods shouldn't take that parameter?
 }
 
 interface MainView(AppObjectId) extends(UiView) {

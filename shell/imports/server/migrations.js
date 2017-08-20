@@ -9,6 +9,7 @@ import { _ } from "meteor/underscore";
 import { Match } from "meteor/check";
 import { userPictureUrl, fetchPicture } from "/imports/server/accounts/picture.js";
 import { waitPromise } from "/imports/server/async-helpers.js";
+import { PRIVATE_IPV4_ADDRESSES, PRIVATE_IPV6_ADDRESSES } from "/imports/constants.js";
 
 const Future = Npm.require("fibers/future");
 const Url = Npm.require("url");
@@ -41,7 +42,7 @@ const enableLegacyOAuthProvidersIfNotInSettings = function (db, backend) {
   // explicitly enable it in Settings, and then the rest of the logic can just
   // depend on what value is in Settings and default to false without breaking
   // user installations.
-  const configurations = Package["service-configuration"].ServiceConfiguration.configurations;
+  const configurations = ServiceConfiguration.configurations;
   ["google", "github"].forEach(function (serviceName) {
     const config = configurations.findOne({ service: serviceName });
     const serviceConfig = db.collections.settings.findOne({ _id: serviceName });
@@ -725,6 +726,14 @@ const addMembraneRequirementsToIdentities = function (db, backend) {
   });
 };
 
+const addEncryptionToFrontendRefIpNetwork = function (db, backend) {
+  db.collections.apiTokens.find({ "frontendRef.ipNetwork": true }).map((apiToken) => {
+    db.collections.apiTokens.update(
+      { _id: apiToken._id },
+      { $set: { "frontendRef.ipNetwork": { encryption: { none: null } } } });
+  });
+};
+
 function backgroundFillInGrainSizes(db, backend) {
   // Fill in sizes for all grains that don't have them. Since computing a grain size requires a
   // directory walk, we don't want to do them all at once. Instead, we compute one a second until
@@ -762,6 +771,65 @@ function backgroundFillInGrainSizes(db, backend) {
   }
 }
 
+function removeFeatureKeys(db, backend) {
+  // Remove obsolete data related to the Sandstorm for Work paywall, which was eliminated.
+
+  db.notifications.remove({ "admin.type": "cantRenewFeatureKey" });
+  db.notifications.remove({ "admin.type": "trialFeatureKeyExpired" });
+}
+
+function setIpBlacklist(db, backend) {
+  if (Meteor.settings.public.isTesting) {
+    db.collections.settings.insert({ _id: "ipBlacklist", value: "192.168.0.0/16" });
+  } else {
+    const defaultIpBlacklist = PRIVATE_IPV4_ADDRESSES.concat(PRIVATE_IPV6_ADDRESSES).join("\n");
+    db.collections.settings.insert({ _id: "ipBlacklist", value: defaultIpBlacklist });
+  }
+}
+
+function notifyIdentityChanges(db, backend) {
+  // Notify users who might be affected by the identity model changes.
+  //
+  // Two types of users are affected:
+  // - Users who have multiple identities with differing names.
+  // - Users who have identities that are shared with other users.
+  //
+  // However, the second group seems like it must be a subset of the first group. So we only check
+  // for the first.
+
+  const names = {};
+  Meteor.users.find({ "profile.name": { $exists: true } }, { fields: { "profile.name": 1 } })
+      .forEach(user => {
+    names[user._id] = user.profile.name;
+  });
+
+  Meteor.users.find({ loginIdentities: { $exists: true } },
+                    { fields: { loginIdentities: 1, nonloginIdentities: 1 } }).forEach(user => {
+    let previousName = null;
+    let needsNotification = false;
+    SandstormDb.getUserIdentityIds(user).forEach(identityId => {
+      const name = names[identityId];
+      if (!name || (previousName && previousName !== name)) {
+        needsNotification = true;
+      }
+
+      previousName = name;
+    });
+
+    if (needsNotification) {
+      db.collections.notifications.upsert({
+        userId: user._id,
+        identityChanges: true,
+      }, {
+        userId: user._id,
+        identityChanges: true,
+        timestamp: new Date(),
+        isUnread: true,
+      });
+    }
+  });
+}
+
 // This must come after all the functions named within are defined.
 // Only append to this list!  Do not modify or remove list entries;
 // doing so is likely change the meaning and semantics of user databases.
@@ -797,6 +865,9 @@ const MIGRATIONS = [
   assignEmailVerifierIds,
   setNewServer,
   addMembraneRequirementsToIdentities,
+  addEncryptionToFrontendRefIpNetwork,
+  setIpBlacklist,
+  notifyIdentityChanges,
 ];
 
 const NEW_SERVER_STARTUP = [

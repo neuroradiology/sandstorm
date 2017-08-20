@@ -29,7 +29,6 @@ globalSubs = [
   Meteor.subscribe("devPackages"),
   Meteor.subscribe("credentials"),
   Meteor.subscribe("accountIdentities"),
-  Meteor.subscribe("featureKey", false),
 ];
 
 Tracker.autorun(function () {
@@ -294,18 +293,18 @@ prettySize = function (size) {
 };
 
 // export: used in shared/demo.js
-launchAndEnterGrainByPackageId = function (packageId) {
+launchAndEnterGrainByPackageId = function (packageId, options) {
   const action = UserActions.findOne({ packageId: packageId });
   if (!action) {
     alert("Somehow, you seem to have attempted to launch a package you have not installed.");
     return;
   } else {
-    launchAndEnterGrainByActionId(action._id, null, null);
+    launchAndEnterGrainByActionId(action._id, null, null, options);
   }
 };
 
 // export: used in sandstorm-ui-app-details
-launchAndEnterGrainByActionId = function (actionId, devPackageId, devIndex) {
+launchAndEnterGrainByActionId = function (actionId, devPackageId, devIndex, options) {
   // Note that this takes a devPackageId and a devIndex as well. If provided,
   // they override the actionId.
   let packageId;
@@ -356,7 +355,7 @@ launchAndEnterGrainByActionId = function (actionId, devPackageId, devIndex) {
               console.error(error);
               alert(error.message);
             } else {
-              Router.go("grain", { grainId: grainId });
+              Router.go("grain", { grainId: grainId }, options);
             }
           });
         });
@@ -365,7 +364,7 @@ launchAndEnterGrainByActionId = function (actionId, devPackageId, devIndex) {
         alert(error.message);
       }
     } else {
-      Router.go("grain", { grainId: grainId });
+      Router.go("grain", { grainId: grainId }, options);
     }
   });
 };
@@ -458,7 +457,7 @@ Template.referrals.helpers({
 
 Template.layout.helpers({
   effectiveServerTitle() {
-    const useServerTitle = globalDb.isFeatureKeyValid() &&
+    const useServerTitle =
         globalDb.getSettingWithFallback("whitelabelUseServerTitleForHomeText", false);
     return useServerTitle ? globalDb.getSettingWithFallback("serverTitle", "Sandstorm") :
         "Sandstorm";
@@ -567,10 +566,7 @@ Template.layout.helpers({
   },
 
   accountButtonsData: function () {
-    const hasFeatureKey = globalDb.isFeatureKeyValid();
-    const showSendFeedback = hasFeatureKey ?
-        !globalDb.getSettingWithFallback("whitelabelHideSendFeedback", false) :
-        true;
+    const showSendFeedback = !globalDb.getSettingWithFallback("whitelabelHideSendFeedback", false);
     return {
       isAdmin: globalDb.isAdmin(),
       grains: globalGrains,
@@ -597,60 +593,13 @@ Template.layout.helpers({
     return isStandalone();
   },
 
-  firstTimeBillingPromptState: function () {
-    // Should we show the first-time billing plan selector?
+  demoModal: function () {
+    return Session.get("globalDemoModal");
+  },
 
-    // Don't show if billing is not enabled.
-    if (!window.BlackrockPayments) return;
-
-    // Don't show on standalone domains.
-    if (isStandalone()) return;
-
-    const user = Meteor.user();
-
-    // Don't show if not logged in.
-    if (!user) return;
-
-    // Don't show if not in the experiment.
-    if (!user.experiments || user.experiments.firstTimeBillingPrompt !== "test") return;
-
-    // Don't show if the user has selected a plan already.
-    if (user.plan && !Session.get("firstTimeBillingPromptOpen")) return;
-
-    // Only show to account users (not identities).
-    if (!user.loginIdentities) return;
-
-    // Don't show to demo users.
-    if (user.expires) return;
-
-    // Don't show when viewing another user's grain. We don't want to scare people away from
-    // logging in to collaborate.
-    const route = Router.current().route.getName();
-    if (route === "shared") return;
-    if (route === "grain") {
-      if (_.some(globalGrains.getAll(), function (grain) {
-        return grain.isActive() && !grain.isOwner();
-      })) {
-
-        return;
-      }
-    }
-
-    // Don't show if user is trying to use a signup key. We're probably going to assign them
-    // a plan shortly.
-    if (route === "signup") return;
-
-    // Don't let the plan chooser disappear instantly once user.plan is set.
-    Session.set("firstTimeBillingPromptOpen", true);
-
-    // OK, show it.
-    return {
-      db: globalDb,
-      topbar: globalTopbar,
-      accountsUi: globalAccountsUi,
-      onComplete: function () {
-        Session.set("firstTimeBillingPromptOpen", false);
-      },
+  dismissDemoModal: function () {
+    return function () {
+      Session.set("globalDemoModal", null);
     };
   },
 });
@@ -660,6 +609,10 @@ Template.layout.events({
     evt.preventDefault();
     evt.stopPropagation();
     logoutSandstorm();
+  },
+
+  "click .demo-startup-modal .start"(evt) {
+    Session.set("globalDemoModal", null);
   },
 });
 
@@ -744,6 +697,13 @@ const startUpload = function (file, endpoint, onComplete) {
   // TODO(cleanup): Use Meteor's HTTP, although this may require sending them a PR to support
   //   progress callbacks (and officially document that binary input is accepted).
 
+  if (endpoint.startsWith("/") && !endpoint.startsWith("//")) {
+    // Endpoint is relative to the current host. Use the DDP host instead, if one is defined,
+    // so that we don't do file transfers over the main host, which may be a CDN.
+    const origin = __meteor_runtime_config__.DDP_DEFAULT_CONNECTION_URL || "";  // jscs:ignore requireCamelCaseOrUpperCaseIdentifiers
+    endpoint = origin + endpoint;
+  }
+
   Session.set("uploadStatus", "Uploading");
   Session.set("uploadError", undefined);
 
@@ -826,6 +786,16 @@ uploadApp = function (file) {
 promptUploadApp = function (input) {
   promptForFile(input, uploadApp);
 };
+
+Template.uploadTest.events({
+  "change #upload-app": function (event, tmpl) {
+    uploadApp(event.currentTarget.files[0]);
+  },
+
+  "change #upload-backup": function (event, tmpl) {
+    restoreBackup(event.currentTarget.files[0]);
+  },
+});
 
 Router.map(function () {
   this.route("root", {
@@ -932,6 +902,16 @@ Router.map(function () {
         error: Session.get("uploadError"),
       };
     },
+  });
+
+  this.route("uploadTest", {
+    path: "/upload-test",
+
+    waitOn: function () {
+      return Meteor.subscribe("credentials");
+    },
+
+    data: function () {},
   });
 
   this.route("referrals", {

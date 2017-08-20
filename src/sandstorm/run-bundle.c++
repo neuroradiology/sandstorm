@@ -19,6 +19,7 @@
 #include <kj/io.h>
 #include <kj/parse/common.h>
 #include <kj/parse/char.h>
+#include <kj/encoding.h>
 #include <capnp/schema.h>
 #include <capnp/dynamic.h>
 #include <capnp/serialize.h>
@@ -954,7 +955,7 @@ public:
     // Get 20 random bytes for token.
     kj::byte bytes[20];
     randombytes_buf(bytes, sizeof(bytes));
-    auto hexString = hexEncode(bytes);
+    auto hexString = kj::encodeHex(bytes);
 
     auto config = readConfig();
 
@@ -1955,7 +1956,9 @@ private:
         // because it wants to connect to mongo first thing.
         sigfd = nullptr;
         clearSignalMask();
-        KJ_SYSCALL(signal(SIGALRM, SIG_DFL));
+        if (signal(SIGALRM, SIG_DFL) == SIG_ERR) {
+          KJ_FAIL_SYSCALL("signal(SIGALRM, SIG_DFL)", errno);
+        }
         fdBundle.closeAll();
         runDevDaemon(config);
         KJ_UNREACHABLE;
@@ -2253,7 +2256,12 @@ private:
       write(outPipe, "ready", 5);
       outPipe = nullptr;
 
-      server.listen(kj::mv(listener)).wait(io.waitScope);
+      server.listen(kj::mv(listener))
+            // Rotate logs, keeping 1-2MB worth. We do this in the backend process mainly because
+            // it is the only asynchronous process in run-bundle.c++.
+            .exclusiveJoin(rotateLog(io.provider->getTimer(),
+                                     STDERR_FILENO, "/var/log/sandstorm.log", 1u << 20))
+            .wait(io.waitScope);
       KJ_UNREACHABLE;
     });
 
@@ -2729,10 +2737,14 @@ private:
     KJ_SYSCALL(chmod("/var/sandstorm/socket/devmode", 0770));
 
     // We don't care to reap dev sessions.
-    KJ_SYSCALL(signal(SIGCHLD, SIG_IGN));
+    if (signal(SIGCHLD, SIG_IGN) == SIG_ERR) {
+      KJ_FAIL_SYSCALL("signal(SIGCHLD, SIG_IGN)", errno);
+    }
 
     // Please don't SIGPIPE if we write to a disconnected socket. An exception is nicer.
-    KJ_SYSCALL(signal(SIGPIPE, SIG_IGN));
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+      KJ_FAIL_SYSCALL("signal(SIGPIPE, SIG_IGN)", errno);
+    }
 
     for (;;) {
       int connFd_;
@@ -2771,7 +2783,9 @@ private:
       KJ_SYSCALL(dup2(fd, STDERR_FILENO));
 
       // Restore SIGCHLD, ignored by parent process.
-      KJ_SYSCALL(signal(SIGCHLD, SIG_DFL));
+      if (signal(SIGCHLD, SIG_DFL) == SIG_ERR) {
+        KJ_FAIL_SYSCALL("signal(SIGCHLD, SIG_DFL)", errno);
+      }
 
       kj::FdInputStream rawInput((int)fd);
       kj::BufferedInputStreamWrapper input(rawInput);
@@ -2870,7 +2884,7 @@ private:
       call.setFunction("BinData");
       auto params = call.initParams(2);
       params[0].setNumber(0);
-      params[1].setString(base64Encode(input, false));
+      params[1].setString(kj::encodeBase64(input, false));
     }
 
     capnp::Orphan<capnp::Data> decode(
@@ -3005,7 +3019,9 @@ private:
       return "file not found";
     } else if (isFile && !arg.startsWith("/")) {
       char absoluteNameBuf[PATH_MAX + 1];
-      KJ_SYSCALL(realpath(arg.cStr(), absoluteNameBuf));
+      if (realpath(arg.cStr(), absoluteNameBuf) == NULL) {
+        KJ_FAIL_SYSCALL("realpath(arg)", errno, arg);
+      }
       updateFile = kj::heapString(absoluteNameBuf);
       return true;
     } else {

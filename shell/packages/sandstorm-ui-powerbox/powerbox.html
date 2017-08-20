@@ -25,83 +25,29 @@
         {{>configureTemplate . }}
       </div>
     {{else}}
-      <h4>Select one:</h4>
-      <div class="search-row">
-        <label>
-          <span title="Search" class="search-icon"></span>
-          <input class="search-bar" type="text" placeholder="search" value="{{ searchText }}">
-        </label>
-      </div>
-      <ul class="candidate-cards">
-      {{#each cards}}
-        <li class="powerbox-card">
-          <button class="card-button" data-card-id="{{ option._id }}"
-                  style="background-image: url('{{ iconSrc }}');">
-            {{>cardTemplate . }}
-          </button>
-        </li>
+      {{#if Template.subscriptionsReady}}
+        <h4>Select one:</h4>
+        <div class="search-row">
+          <label>
+            <span title="Search" class="search-icon"></span>
+            <input class="search-bar" type="text" placeholder="search" value="{{ searchText }}">
+          </label>
+        </div>
+        <ul class="candidate-cards">
+        {{#each cards}}
+          <li class="powerbox-card">
+            <button class="card-button" data-card-id="{{ option._id }}"
+                    style="background-image: url('{{ iconSrc }}');">
+              {{>cardTemplate . }}
+            </button>
+          </li>
+        {{else}}
+          <p>No grains can provide the requested interface.</p>
+        {{/each}}
+        </ul>
       {{else}}
-        <p>No grains can provide the requested interface.</p>
-      {{/each}}
-      </ul>
+        <p>Loading...</p>
+      {{/if}}
     {{/with}}
   {{/if}}
-</template>
-
-<!-- TODO(cleanup): Find a better home for these specific card templates. -->
-
-<template name="grainPowerboxCard">
-  {{ grainInfo.title }}
-</template>
-
-<template name="uiViewPowerboxConfiguration">
-  <form>
-    <p>with permissions:</p>
-    {{#each role in viewInfo.roles}}
-      <label><input type="radio" name="role" value="{{role.index}}">{{role.title.defaultText}} - {{role.verbPhrase.defaultText}}</label>
-    {{else}}
-      <label><input type="radio" checked="true" name="role" value="all">Full access</label>
-    {{/each}}
-    <button class="connect-button">Connect</button>
-  </form>
-</template>
-
-<template name="ipNetworkPowerboxCard">
-  Admin: grant all outgoing network access
-</template>
-
-<template name="ipInterfacePowerboxCard">
-  Admin: grant all incoming network access
-</template>
-
-<template name="emailVerifierPowerboxCard">
-  {{#if option.frontendRef.emailVerifier.services}}
-    Verify e-mail addresses using {{ serviceTitle }}
-  {{else}}
-    Verify e-mail addresses using any login service
-  {{/if}}
-</template>
-
-<template name="verifiedEmailPowerboxCard">
-  {{ option.frontendRef.verifiedEmail.address }}
-</template>
-
-<template name="identityPowerboxCard">
-  {{ option.profile.name }}
-</template>
-
-<template name="identityPowerboxConfiguration">
-  <form>
-    <p>with permissions:</p>
-    {{#each role in sufficientRoles}}
-      <label><input type="radio" name="role" value="{{role.index}}">{{role.title.defaultText}} - {{role.verbPhrase.defaultText}}</label>
-    {{else}}
-      <label><input type="radio" checked="true" name="role" value="all">Full access</label>
-    {{/each}}
-    <button class="connect-button">Connect</button>
-  </form>
-</template>
-
-<template name="addNewVerifiedEmailPowerboxCard">
-  Add a new address
 </template>

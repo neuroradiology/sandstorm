@@ -84,13 +84,7 @@ SAML.prototype.generateAuthorizeRequest = function (req) {
     "\" AllowCreate=\"true\"></samlp:NameIDPolicy>\n";
   }
 
-  request +=
-    "<samlp:RequestedAuthnContext xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" Comparison=\"exact\">" +
-      "<saml:AuthnContextClassRef xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\">" +
-        "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport" +
-      "</saml:AuthnContextClassRef>" +
-    "</samlp:RequestedAuthnContext>\n" +
-  "</samlp:AuthnRequest>";
+  request += "</samlp:AuthnRequest>";
 
   return request;
 };
@@ -358,6 +352,11 @@ SAML.prototype.validateResponse = function (samlResponse, callback) {
         const microsoftEmail = profile["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"];
         if (!profile.email && microsoftEmail) {
           profile.email = microsoftEmail;
+        }
+
+        const azureAdEmail = profile["http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"];
+        if (!profile.email && azureAdEmail) {
+          profile.email = azureAdEmail;
         }
 
         const microsoftDisplayName = profile["http://schemas.microsoft.com/identity/claims/displayname"];

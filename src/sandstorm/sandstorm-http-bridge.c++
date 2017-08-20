@@ -25,10 +25,12 @@
 #include <kj/async-io.h>
 #include <kj/async-unix.h>
 #include <kj/io.h>
+#include <kj/encoding.h>
 #include <capnp/rpc-twoparty.h>
 #include <capnp/rpc.capnp.h>
 #include <capnp/schema.h>
 #include <capnp/serialize.h>
+#include <capnp/compat/json.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <map>
@@ -48,12 +50,14 @@
 #include <sandstorm/web-session.capnp.h>
 #include <sandstorm/email.capnp.h>
 #include <sandstorm/sandstorm-http-bridge.capnp.h>
+#include <sandstorm/sandstorm-http-bridge-internal.capnp.h>
 #include <sandstorm/hack-session.capnp.h>
 #include <sandstorm/package.capnp.h>
 #include <joyent-http/http_parser.h>
 
 #include "version.h"
 #include "util.h"
+#include "bridge-proxy.h"
 
 namespace sandstorm {
 
@@ -66,7 +70,8 @@ kj::Array<byte> toBytes(kj::StringPtr text, kj::ArrayPtr<const byte> data = null
 
 kj::String textIdentityId(capnp::Data::Reader id) {
   // We truncate to 128 bits to be a little more wieldy. Still 32 chars, though.
-  return hexEncode(id.slice(0, kj::min(id.size(), 16)));
+  KJ_ASSERT(id.size() == 32, "Identity ID not a SHA-256?");
+  return kj::encodeHex(id.slice(0, kj::min(id.size(), 16)));
 }
 
 struct HttpStatusInfo {
@@ -1054,10 +1059,26 @@ private:
 
 class BridgeContext: private kj::TaskSet::ErrorHandler {
 public:
-  BridgeContext(SandstormApi<>::Client apiCap, spk::BridgeConfig::Reader config)
+  BridgeContext(SandstormApi<BridgeObjectId>::Client apiCap, spk::BridgeConfig::Reader config)
       : apiCap(kj::mv(apiCap)), config(config),
         identitiesDir(openIdentitiesDir(config)),
         trashDir(openTrashDir(config)), tasks(*this) {}
+
+  kj::String formatPermissions(capnp::List<bool>::Reader userPermissions) {
+    auto configPermissions = config.getViewInfo().getPermissions();
+    kj::Vector<kj::String> permissionVec(configPermissions.size());
+
+    for (uint i = 0; i < configPermissions.size() && i < userPermissions.size(); ++i) {
+      if (userPermissions[i]) {
+        permissionVec.add(kj::str(configPermissions[i].getName()));
+      }
+    }
+    return kj::strArray(permissionVec, ",");
+  }
+
+  capnp::List<spk::BridgeConfig::PowerboxApi>::Reader getPowerboxApis() {
+    return config.getPowerboxApis();
+  }
 
   void saveIdentity(capnp::Data::Reader identityId, Identity::Client identity) {
     if (!config.getSaveIdentityCaps()) return;
@@ -1152,7 +1173,7 @@ public:
   // TODO(cleanup): Make this private with appropriate accessor methods.
 
 private:
-  SandstormApi<>::Client apiCap;
+  SandstormApi<BridgeObjectId>::Client apiCap;
   spk::BridgeConfig::Reader config;
   kj::AutoCloseFd identitiesDir;
   kj::AutoCloseFd trashDir;
@@ -1207,7 +1228,7 @@ private:
     buf[n] = '\0';
 
     auto req = apiCap.restoreRequest();
-    req.setToken(percentDecode(buf));
+    req.setToken(kj::decodeBinaryUriComponent(buf));
 
     return req.send().getCap().castAs<Identity>();
   }
@@ -1221,7 +1242,7 @@ private:
     req.initLabel().setDefaultText("user identity");
     tasks.add(req.send().then([this,textId](auto result) -> void {
       // Sandstorm tokens are primarily text but use percent-encoding to be safe.
-      auto tokenText = percentEncode(result.getToken());
+      auto tokenText = kj::encodeUriComponent(result.getToken());
 
       // Clean up any existing symlink.
       dropIdentity(textId);
@@ -1251,7 +1272,7 @@ private:
       KJ_SYSCALL(renameat(identitiesDir, symlink.cStr(), trashDir, trashSymlink.cStr()));
 
       auto req = apiCap.dropRequest();
-      req.setToken(percentDecode(buf));
+      req.setToken(kj::decodeBinaryUriComponent(buf));
       tasks.add(req.send().then([KJ_MVCAP(trashSymlink), this](auto response) -> void {
         KJ_SYSCALL(unlinkat(trashDir, trashSymlink.cStr(), 0));
       }));
@@ -1263,19 +1284,21 @@ private:
   }
 };
 
-class WebSessionImpl final: public WebSession::Server {
+class WebSessionImpl final: public BridgeHttpSession::Server {
 public:
   WebSessionImpl(kj::NetworkAddress& serverAddr,
                  UserInfo::Reader userInfo, SessionContext::Client sessionContext,
                  BridgeContext& bridgeContext, kj::String&& sessionId, kj::String&& tabId,
                  kj::String&& basePath, kj::String&& userAgent, kj::String&& acceptLanguages,
-                 kj::String&& rootPath, kj::String&& permissions, kj::Maybe<kj::String> remoteAddress)
+                 kj::String&& rootPath, kj::String&& permissions,
+                 kj::Maybe<kj::String> remoteAddress,
+                 kj::Maybe<OwnCapnp<BridgeObjectId::HttpApi>>&& apiInfo)
       : serverAddr(serverAddr),
         sessionContext(kj::mv(sessionContext)),
         bridgeContext(bridgeContext),
         sessionId(kj::mv(sessionId)),
         tabId(kj::mv(tabId)),
-        userDisplayName(percentEncode(userInfo.getDisplayName().getDefaultText())),
+        userDisplayName(kj::encodeUriComponent(userInfo.getDisplayName().getDefaultText())),
         userHandle(kj::heapString(userInfo.getPreferredHandle())),
         userPicture(kj::heapString(userInfo.getPictureUrl())),
         userPronouns(userInfo.getPronouns()),
@@ -1284,18 +1307,20 @@ public:
         userAgent(kj::mv(userAgent)),
         acceptLanguages(kj::mv(acceptLanguages)),
         rootPath(kj::mv(rootPath)),
-        remoteAddress(kj::mv(remoteAddress)) {
+        remoteAddress(kj::mv(remoteAddress)),
+        apiInfo(kj::mv(apiInfo)) {
     if (userInfo.hasIdentityId()) {
-      auto id = userInfo.getIdentityId();
-      KJ_ASSERT(id.size() == 32, "Identity ID not a SHA-256?");
-
       userId = textIdentityId(userInfo.getIdentityId());
     }
-    bridgeContext.sessions.insert({kj::StringPtr(this->sessionId), this->sessionContext});
+    if (this->sessionId != nullptr) {
+      bridgeContext.sessions.insert({kj::StringPtr(this->sessionId), this->sessionContext});
+    }
   }
 
   ~WebSessionImpl() noexcept(false) {
-    bridgeContext.sessions.erase(kj::StringPtr(sessionId));
+    if (this->sessionId != nullptr) {
+      bridgeContext.sessions.erase(kj::StringPtr(sessionId));
+    }
   }
 
   kj::Promise<void> get(GetContext context) override {
@@ -1515,6 +1540,22 @@ public:
     });
   }
 
+  kj::Promise<void> save(SaveContext context) override {
+    KJ_IF_MAYBE(info, apiInfo) {
+      auto results = context.getResults();
+      results.initObjectId().setHttpApi(*info);
+      for (auto meta: bridgeContext.getPowerboxApis()) {
+        if (meta.getName() == info->getName()) {
+          results.setLabel(meta.getDisplayInfo().getTitle());
+          break;
+        }
+      }
+      return kj::READY_NOW;
+    } else {
+      KJ_UNIMPLEMENTED("can't save() non-powerbox BridgeHttpSession");
+    }
+  }
+
 private:
   kj::NetworkAddress& serverAddr;
   SessionContext::Client sessionContext;
@@ -1533,6 +1574,7 @@ private:
   kj::String rootPath;
   spk::BridgeConfig::Reader config;
   kj::Maybe<kj::String> remoteAddress;
+  kj::Maybe<OwnCapnp<BridgeObjectId::HttpApi>> apiInfo;
 
   kj::String makeHeaders(kj::StringPtr method, kj::StringPtr path,
                          WebSession::Context::Reader context,
@@ -1606,6 +1648,9 @@ private:
     lines.add(kj::str("X-Sandstorm-Session-Id: ", sessionId));
     KJ_IF_MAYBE(addr, remoteAddress) {
       lines.add(kj::str("X-Real-IP: ", *addr));
+    }
+    KJ_IF_MAYBE(i, apiInfo) {
+      lines.add(kj::str("X-Sandstorm-Api: ", i->getName()));
     }
 
     auto cookies = context.getCookies();
@@ -1791,6 +1836,51 @@ private:
   }
 };
 
+WebSession::Client newPowerboxApiSession(
+    kj::NetworkAddress& serverAddress, BridgeContext& bridgeContext,
+    OwnCapnp<BridgeObjectId::HttpApi>&& httpApi) {
+  // We need to fetch the user's profile information.
+  //
+  // TODO(someday): The restore() method should be extended to take profile information as a
+  //   parameter, passed from Sandstorm. The profile information should allow for representing
+  //   the client grain as if it were an identity, so that when one grain changes another through
+  //   an API, the changes are attributed to the calling grain, not to the user who connected the
+  //   grains. (Of course, the "who has access" tree can indicate who gave that grain
+  //   permission.)
+  auto identity = bridgeContext.loadIdentity(textIdentityId(httpApi.getIdentityId()));
+  auto profileRequest = identity.getProfileRequest().send();
+  auto pictureRequest = profileRequest.getProfile().getPicture().getUrlRequest().send();
+
+  return profileRequest
+      .then([&serverAddress,&bridgeContext,KJ_MVCAP(httpApi),
+             KJ_MVCAP(pictureRequest),KJ_MVCAP(identity)](
+          capnp::Response<Identity::GetProfileResults> profileResponse) mutable {
+    return pictureRequest.then([&serverAddress,&bridgeContext,KJ_MVCAP(httpApi),
+                                KJ_MVCAP(profileResponse),KJ_MVCAP(identity)](
+        capnp::Response<StaticAsset::GetUrlResults> pictureResponse) mutable {
+      auto profile = profileResponse.getProfile();
+      capnp::MallocMessageBuilder userInfoBuilder;
+      auto userInfo = userInfoBuilder.getRoot<UserInfo>();
+      userInfo.setDisplayName(profile.getDisplayName());
+      userInfo.setPreferredHandle(profile.getPreferredHandle());
+      userInfo.setPictureUrl(
+          kj::str(pictureResponse.getProtocol(), "://", pictureResponse.getHostPath()));
+      userInfo.setPronouns(profile.getPronouns());
+      userInfo.setPermissions(httpApi.getPermissions());
+      userInfo.setIdentityId(httpApi.getIdentityId());
+      userInfo.setIdentity(kj::mv(identity));
+
+      return WebSession::Client(
+          kj::heap<WebSessionImpl>(serverAddress, userInfo, nullptr,
+                                   bridgeContext, nullptr, nullptr,
+                                   nullptr, nullptr, nullptr,
+                                   kj::str(httpApi.getPath(), '/'),
+                                   bridgeContext.formatPermissions(httpApi.getPermissions()),
+                                   nullptr, kj::mv(httpApi)));
+    });
+  });
+}
+
 class EmailSessionImpl final: public HackEmailSession::Server {
 public:
   kj::Promise<void> send(SendContext context) override {
@@ -1936,20 +2026,151 @@ private:
     addHeader(lines, "Content-Id", attachment.getContentId());
     lines.add(nullptr);
 
-    lines.add(base64Encode(attachment.getContent(), true));
+    lines.add(kj::encodeBase64(attachment.getContent(), true));
   }
 };
 
+class RequestSessionImpl final: public WebSession::Server {
+public:
+  RequestSessionImpl(kj::NetworkAddress& serverAddress, BridgeContext& bridgeContext,
+                     SessionContext::Client sessionContext,
+                     kj::Array<byte>&& identityId, kj::Array<bool>&& permissions)
+      : serverAddress(serverAddress),
+        bridgeContext(bridgeContext),
+        sessionContext(kj::mv(sessionContext)),
+        identityId(kj::mv(identityId)),
+        permissions(kj::mv(permissions)) {
+    // Find where we're supposed to inject the config blob into the HTML.
+    kj::StringPtr html = *BRIDGE_REQUEST_SESSION_HTML;
+
+    static char MARKER[] = "@CONFIG@";
+    const char* configPos = strstr(html.begin(), MARKER);
+    KJ_ASSERT(configPos != nullptr);
+
+    prefix = html.slice(0, configPos - html.begin());
+    suffix = html.slice(configPos - html.begin() + strlen(MARKER), html.size());
+  }
+
+  kj::Promise<void> get(GetContext context) override {
+    auto params = context.getParams();
+    auto path = params.getPath();
+    auto results = context.getResults();
+
+    if (path == "") {
+      // Determine the subset of PowerboxApis which the user has permission to choose.
+      //
+      // TODO(soon): Also match against descriptors.
+      kj::Vector<spk::BridgeConfig::PowerboxApi::Reader> apis;
+      for (auto api: bridgeContext.getPowerboxApis()) {
+        bool requirementsMet = true;
+
+        if (api.hasPermissions()) {
+          auto requiredPermissions = api.getPermissions();
+          for (size_t i: kj::indices(requiredPermissions)) {
+            if (requiredPermissions[i]) {
+              if (permissions.size() <= i || !permissions[i]) {
+                requirementsMet = false;
+                break;
+              }
+            }
+          }
+        }
+
+        if (requirementsMet) {
+          apis.add(api);
+        }
+      }
+
+      // JSON-ify that list as the config blob.
+      capnp::MallocMessageBuilder filteredConfig;
+      auto list = filteredConfig.getRoot<spk::BridgeConfig>().initPowerboxApis(apis.size());
+      for (size_t i: kj::indices(apis)) {
+        list.setWithCaveats(i, apis[i]);
+      }
+
+      capnp::JsonCodec codec;
+      auto config = codec.encode(list);
+
+      // Send back our static HTML with the config blob injected into it.
+      auto content = results.initContent();
+      content.setMimeType("text/html; charset=UTF-8");
+      auto body = content.initBody().initBytes(prefix.size() + config.size() + suffix.size());
+      memcpy(body.begin(), prefix.begin(), prefix.size());
+      memcpy(body.begin() + prefix.size(), config.begin(), config.size());
+      memcpy(body.begin() + prefix.size() + config.size(), suffix.begin(), suffix.size());
+      return kj::READY_NOW;
+    } else {
+      auto error = results.initClientError();
+      error.setStatusCode(WebSession::Response::ClientErrorCode::NOT_FOUND);
+      error.setDescriptionHtml("404 not found");
+      return kj::READY_NOW;
+    }
+  }
+
+  kj::Promise<void> post(PostContext context) override {
+    auto params = context.getParams();
+    auto path = params.getPath();
+    auto results = context.getResults();
+
+    if (path == "") {
+      auto name = kj::str(params.getContent().getContent().asChars());
+
+      for (auto api: bridgeContext.getPowerboxApis()) {
+        if (api.getName() == name) {
+          auto req = sessionContext.fulfillRequestRequest();
+
+          auto tag = req.initDescriptor().initTags(1)[0];
+          tag.setId(capnp::typeId<ApiSession>());
+          tag.initValue().setAs<ApiSession::PowerboxTag>(api.getTag());
+
+          req.setRequiredPermissions(api.getPermissions());
+          req.setDisplayInfo(api.getDisplayInfo());
+
+          capnp::MallocMessageBuilder message(32);
+          auto httpApi = message.getRoot<BridgeObjectId::HttpApi>();
+          httpApi.setIdentityId(identityId);
+          httpApi.setName(name);
+          httpApi.setPath(api.getPath());
+          httpApi.setPermissions(api.getPermissions());
+
+          req.setCap(newPowerboxApiSession(serverAddress, bridgeContext,
+              newOwnCapnp(httpApi.asReader())));
+
+          results.initNoContent();
+          return req.send().ignoreResult();
+        }
+      }
+
+      KJ_FAIL_REQUIRE("unknown API", name);
+
+    } else {
+      auto error = results.initClientError();
+      error.setStatusCode(WebSession::Response::ClientErrorCode::NOT_FOUND);
+      error.setDescriptionHtml("404 not found");
+      return kj::READY_NOW;
+    }
+  }
+
+private:
+  kj::NetworkAddress& serverAddress;
+  BridgeContext& bridgeContext;
+  SessionContext::Client sessionContext;
+  kj::Array<byte> identityId;
+  kj::Array<bool> permissions;
+
+  kj::ArrayPtr<const char> prefix;
+  kj::ArrayPtr<const char> suffix;
+};
 
 class SandstormHttpBridgeImpl: public SandstormHttpBridge::Server {
 public:
-  explicit SandstormHttpBridgeImpl(SandstormApi<>::Client&& apiCap,
+  explicit SandstormHttpBridgeImpl(SandstormApi<BridgeObjectId>::Client&& apiCap,
                                    BridgeContext& bridgeContext)
       : apiCap(kj::mv(apiCap)),
         bridgeContext(bridgeContext) {}
 
   kj::Promise<void> getSandstormApi(GetSandstormApiContext context) override {
-    context.getResults().setApi(apiCap);
+    context.getResults().setApi(apiCap.castAs<SandstormApi<>>());
     return kj::READY_NOW;
   }
 
@@ -1978,19 +2199,36 @@ public:
   }
 
 private:
-  SandstormApi<>::Client apiCap;
+  SandstormApi<BridgeObjectId>::Client apiCap;
   BridgeContext& bridgeContext;
 };
 
-class UiViewImpl final: public UiView::Server {
+class UiViewImpl final: public MainView<BridgeObjectId>::Server {
 public:
   explicit UiViewImpl(kj::NetworkAddress& serverAddress,
                       BridgeContext& bridgeContext,
-                      spk::BridgeConfig::Reader config)
-      : serverAddress(serverAddress), bridgeContext(bridgeContext), config(config) {}
+                      spk::BridgeConfig::Reader config,
+                      kj::Promise<void>&& connectPromise)
+      : serverAddress(serverAddress),
+        bridgeContext(bridgeContext),
+        config(config),
+        connectPromise(connectPromise.fork()) {}
 
   kj::Promise<void> getViewInfo(GetViewInfoContext context) override {
     context.setResults(config.getViewInfo());
+
+    // Copy in powerbox API descriptors.
+    auto apis = config.getPowerboxApis();
+    if (apis.size() > 0) {
+      auto viewInfo = context.getResults();
+      auto descriptors = viewInfo.initMatchRequests(apis.size());
+      for (size_t i: kj::indices(apis)) {
+        auto tag = descriptors[i].initTags(1)[0];
+        tag.setId(capnp::typeId<ApiSession>());
+        tag.getValue().setAs<ApiSession::PowerboxTag>(apis[i].getTag());
+      }
+    }
+
     return kj::READY_NOW;
   }
 
@@ -2012,16 +2250,21 @@ public:
       auto userPermissions = userInfo.getPermissions();
       auto sessionParams = params.getSessionParams().getAs<WebSession::Params>();
 
+      UiSession::Client session =
+        kj::heap<WebSessionImpl>(serverAddress, userInfo, params.getContext(),
+                                 bridgeContext, kj::str(sessionIdCounter++),
+                                 kj::encodeHex(params.getTabId()),
+                                 kj::heapString(sessionParams.getBasePath()),
+                                 kj::heapString(sessionParams.getUserAgent()),
+                                 kj::strArray(sessionParams.getAcceptableLanguages(), ","),
+                                 kj::heapString("/"),
+                                 bridgeContext.formatPermissions(userPermissions),
+                                 nullptr, nullptr);
+
       context.getResults(capnp::MessageSize {2, 1}).setSession(
-          kj::heap<WebSessionImpl>(serverAddress, userInfo, params.getContext(),
-                                   bridgeContext, kj::str(sessionIdCounter++),
-                                   hexEncode(params.getTabId()),
-                                   kj::heapString(sessionParams.getBasePath()),
-                                   kj::heapString(sessionParams.getUserAgent()),
-                                   kj::strArray(sessionParams.getAcceptableLanguages(), ","),
-                                   kj::heapString("/"),
-                                   formatPermissions(userPermissions),
-                                   nullptr));
+        connectPromise.addBranch().then([KJ_MVCAP(session)]() mutable {
+          return kj::mv(session);
+        }));
     } else if (sessionType == capnp::typeId<ApiSession>()) {
       auto userPermissions = userInfo.getPermissions();
       auto sessionParams = params.getSessionParams().getAs<ApiSession::Params>();
@@ -2030,14 +2273,19 @@ public:
         addr = addressToString(sessionParams.getRemoteAddress());
       }
 
+      UiSession::Client session =
+        kj::heap<WebSessionImpl>(serverAddress, userInfo, params.getContext(),
+                                 bridgeContext, kj::str(sessionIdCounter++),
+                                 kj::encodeHex(params.getTabId()),
+                                 kj::heapString(""), kj::heapString(""), kj::heapString(""),
+                                 kj::heapString(config.getApiPath()),
+                                 bridgeContext.formatPermissions(userPermissions),
+                                 kj::mv(addr), nullptr);
+
       context.getResults(capnp::MessageSize {2, 1}).setSession(
-          kj::heap<WebSessionImpl>(serverAddress, userInfo, params.getContext(),
-                                   bridgeContext, kj::str(sessionIdCounter++),
-                                   hexEncode(params.getTabId()),
-                                   kj::heapString(""), kj::heapString(""), kj::heapString(""),
-                                   kj::heapString(config.getApiPath()),
-                                   formatPermissions(userPermissions),
-                                   kj::mv(addr)));
+        connectPromise.addBranch().then([KJ_MVCAP(session)]() mutable {
+          return kj::mv(session);
+        }));
     } else if (sessionType == capnp::typeId<HackEmailSession>()) {
       context.getResults(capnp::MessageSize {2, 1}).setSession(kj::heap<EmailSessionImpl>());
     }
@@ -2045,19 +2293,51 @@ public:
     return kj::READY_NOW;
   }
 
-private:
-  inline kj::String formatPermissions(capnp::List<bool>::Reader& userPermissions) {
-    auto configPermissions = config.getViewInfo().getPermissions();
-    kj::Vector<kj::String> permissionVec(configPermissions.size());
+  kj::Promise<void> newRequestSession(NewRequestSessionContext context) override {
+    auto params = context.getParams();
 
-    for (uint i = 0; i < configPermissions.size() && i < userPermissions.size(); ++i) {
-      if (userPermissions[i]) {
-        permissionVec.add(kj::str(configPermissions[i].getName()));
-      }
+    KJ_REQUIRE(params.getSessionType() == capnp::typeId<WebSession>(),
+               "Unsupported request session type.");
+
+    auto userInfo = params.getUserInfo();
+    if (userInfo.hasIdentity() && config.getSaveIdentityCaps()) {
+      bridgeContext.saveIdentity(userInfo.getIdentityId(), userInfo.getIdentity());
     }
-    return kj::strArray(permissionVec, ",");
+
+    auto permissions = kj::heapArrayFromIterable<bool>(userInfo.getPermissions());
+
+    UiSession::Client session =
+        kj::heap<RequestSessionImpl>(
+            serverAddress, bridgeContext, params.getContext(),
+            kj::heapArray(userInfo.getIdentityId()), kj::mv(permissions));
+
+    context.getResults(capnp::MessageSize {2, 1}).setSession(
+        connectPromise.addBranch().then([KJ_MVCAP(session)]() mutable {
+          return kj::mv(session);
+        }));
+    return kj::READY_NOW;
   }
 
+  kj::Promise<void> restore(RestoreContext context) override {
+    auto objectId = context.getParams().getObjectId();
+
+    if (objectId.isApplication()) {
+      KJ_UNIMPLEMENTED("application-defined object IDs not implemented");
+    }
+
+    KJ_REQUIRE(objectId.isHttpApi(), "unrecognized object ID type");
+
+    context.getResults().setCap(
+        newPowerboxApiSession(serverAddress, bridgeContext, newOwnCapnp(objectId.getHttpApi())));
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> drop(DropContext context) override {
+    // We ignore drops, because our ObjectId format is too ambiguous for it to be useful.
+    return kj::READY_NOW;
+  }
+
+private:
   inline kj::String addressToString(::sandstorm::IpAddress::Reader&& address) {
     uint64_t lower64 = address.getLower64();
     uint64_t upper64 = address.getUpper64();
@@ -2103,6 +2383,11 @@ private:
   kj::NetworkAddress& serverAddress;
   BridgeContext& bridgeContext;
   spk::BridgeConfig::Reader config;
+
+  kj::ForkedPromise<void> connectPromise;
+  // A promise that resolves once we have successfully connected to the app. Only after
+  // this resolves do we attempt to forward any incoming HTTP requests to the app.
+
   uint sessionIdCounter = 0;
   // SessionIds are assigned sequentially.
   // TODO(security): It might be useful to make these sessionIds more random, to reduce the chance
@@ -2173,6 +2458,37 @@ public:
     });
   }
 
+  kj::Promise<void> connectLoop(kj::Own<kj::NetworkAddress>&& address,
+                                kj::Timer& timer,
+                                bool loggedSlowStartupMessage,
+                                int numTriesSoFar) {
+    return address->connect().then([this, loggedSlowStartupMessage](auto x) -> void {
+      if (loggedSlowStartupMessage) {
+        KJ_LOG(WARNING, "App successfully started listening for TCP connections!");
+      }
+    }).catch_(
+        [KJ_MVCAP(address), &timer, loggedSlowStartupMessage, numTriesSoFar, this]
+        (kj::Exception&& e) mutable {
+      if (!loggedSlowStartupMessage) {
+        numTriesSoFar++;
+      }
+      if (!loggedSlowStartupMessage && numTriesSoFar == (30 * 100)) {
+        // After 30 seconds (30 * 100 centiseconds) of failure, log a message once.
+        KJ_LOG(WARNING, "App isn't listening for TCP connections after 30 seconds. Continuing "
+               "to attempt to connect",
+               address->toString());
+        loggedSlowStartupMessage = true;
+      }
+      // Wait 10ms and try again.
+      return timer.afterDelay(10 * kj::MILLISECONDS).then(
+          [KJ_MVCAP(address), &timer, loggedSlowStartupMessage, numTriesSoFar, this]
+          () mutable -> kj::Promise<void> {
+        return connectLoop(kj::mv(address), timer,
+                           loggedSlowStartupMessage, numTriesSoFar);
+      });
+    });
+  }
+
   class ErrorHandlerImpl: public kj::TaskSet::ErrorHandler {
   public:
     void taskFailed(kj::Exception&& exception) override {
@@ -2181,6 +2497,13 @@ public:
   };
 
   kj::MainBuilder::Validity run() {
+    static constexpr uint PROXY_PORT = 15239;  // random; hopefully doesn't conflict with anything
+
+    auto proxyEnv = kj::str("http://127.0.0.1:", PROXY_PORT, "/");
+    KJ_SYSCALL(setenv("http_proxy", proxyEnv.cStr(), true));
+    KJ_SYSCALL(setenv("HTTP_PROXY", proxyEnv.cStr(), true));
+    KJ_SYSCALL(setenv("no_proxy", "localhost,127.0.0.1", true));
+
     pid_t child;
     KJ_SYSCALL(child = fork());
     if (child == 0) {
@@ -2193,7 +2516,9 @@ public:
       sigset_t sigset;
       KJ_SYSCALL(sigemptyset(&sigset));
       KJ_SYSCALL(sigprocmask(SIG_SETMASK, &sigset, nullptr));
-      KJ_SYSCALL(signal(SIGPIPE, SIG_DFL));
+      if (signal(SIGPIPE, SIG_DFL) == SIG_ERR) {
+        KJ_FAIL_SYSCALL("signal(SIGPIPE, SIG_DFL)", errno);
+      }
 
       char* argv[command.size() + 1];
       for (uint i: kj::indices(command)) {
@@ -2223,37 +2548,8 @@ public:
             "** HTTP-BRIDGE: Uncaught exception waiting for child process:\n", e));
       });
 
-      // Wait until connections are accepted.
-      // TODO(soon): Don't block pure-Cap'n-Proto RPCs on this. Just block HTTP requests.
-      bool success = false;
-      int numTriesSoFar = 0;
-      bool loggedSlowStartupMessage = false;
-      for (;;) {
-        kj::runCatchingExceptions([&]() {
-          if (! loggedSlowStartupMessage) {
-            numTriesSoFar++;
-          }
-          address->connect().wait(ioContext.waitScope);
-          success = true;
-        });
-        if (success) {
-          if (loggedSlowStartupMessage) {
-            KJ_LOG(WARNING, "App successfully started listening for TCP connections!");
-          }
-          break;
-        }
-
-        if (!loggedSlowStartupMessage && numTriesSoFar == (30 * 100)) {
-          // After 30 seconds (30 * 100 centiseconds) of failure, log a message once.
-          KJ_LOG(WARNING, "App isn't listening for TCP connections after 30 seconds. Continuing "
-                 "to attempt to connect",
-                 address->toString());
-          loggedSlowStartupMessage = true;
-        }
-
-        // Wait 10ms and try again.
-        usleep(10000);
-      }
+      auto connectPromise =
+        connectLoop(address->clone(), ioContext.provider->getTimer(), false, 0);
 
       // We potentially re-traverse the BridgeConfig on every request, so make sure to max out the
       // traversal limit.
@@ -2263,35 +2559,56 @@ public:
           raiiOpen("/sandstorm-http-bridge-config", O_RDONLY), options);
       auto config = reader.getRoot<spk::BridgeConfig>();
 
-      auto apiPaf = kj::newPromiseAndFulfiller<SandstormApi<>::Client>();
+      auto apiPaf = kj::newPromiseAndFulfiller<SandstormApi<BridgeObjectId>::Client>();
       BridgeContext bridgeContext(kj::mv(apiPaf.promise), config);
 
       // Set up the Supervisor API socket.
       auto stream = ioContext.lowLevelProvider->wrapSocketFd(3);
       capnp::TwoPartyVatNetwork network(*stream, capnp::rpc::twoparty::Side::CLIENT);
-      auto rpcSystem = capnp::makeRpcServer(network,
-          kj::heap<UiViewImpl>(*address, bridgeContext, config));
+      auto rpcSystem = capnp::makeRpcServer(
+        network,
+        kj::heap<UiViewImpl>(*address, bridgeContext, config, kj::mv(connectPromise)));
 
       // Get the SandstormApi by restoring a null SturdyRef.
       capnp::MallocMessageBuilder message;
       auto vatId = message.initRoot<capnp::rpc::twoparty::VatId>();
       vatId.setSide(capnp::rpc::twoparty::Side::SERVER);
-      SandstormApi<>::Client api = rpcSystem.bootstrap(vatId).castAs<SandstormApi<>>();
+      SandstormApi<BridgeObjectId>::Client api = rpcSystem.bootstrap(vatId)
+          .castAs<SandstormApi<BridgeObjectId>>();
       apiPaf.fulfiller->fulfill(kj::cp(api));
 
       // Export a Unix socket on which the application can connect and make calls directly to the
       // Sandstorm API.
       SandstormHttpBridge::Client sandstormHttpBridge =
-          kj::heap<SandstormHttpBridgeImpl>(kj::mv(api), bridgeContext);
+          kj::heap<SandstormHttpBridgeImpl>(kj::cp(api), bridgeContext);
       ErrorHandlerImpl errorHandler;
       kj::TaskSet tasks(errorHandler);
       unlink("/tmp/sandstorm-api");  // Clear stale socket, if any.
       auto acceptTask = ioContext.provider->getNetwork()
           .parseAddress("unix:/tmp/sandstorm-api", 0)
-          .then([&, KJ_MVCAP(sandstormHttpBridge)](kj::Own<kj::NetworkAddress>&& addr) mutable {
+          .then([&, sandstormHttpBridge](kj::Own<kj::NetworkAddress>&& addr) mutable {
         auto serverPort = addr->listen();
         auto promise = acceptLoop(*serverPort, kj::mv(sandstormHttpBridge), tasks);
         return promise.attach(kj::mv(serverPort));
+      });
+
+      // Export an HTTP proxy which the app can use to make HTTP API requests.
+      kj::HttpHeaderTable::Builder headerTableBuilder;
+      auto bridgeProxy = newBridgeProxy(api, sandstormHttpBridge, config, headerTableBuilder);
+      auto headerTable = headerTableBuilder.build();
+
+      // No need for request timeouts on this proxy. We trust the app.
+      kj::HttpServer::Settings settings;
+      settings.headerTimeout = 1 * kj::DAYS;
+      settings.pipelineTimeout = 1 * kj::DAYS;
+      kj::HttpServer server(ioContext.provider->getTimer(), *headerTable, *bridgeProxy, settings);
+
+      auto proxyAddress = ioContext.provider->getNetwork()
+          .parseAddress("127.0.0.1", PROXY_PORT).wait(ioContext.waitScope);
+      auto proxyListener = proxyAddress->listen();
+      auto listenTask = server.listenHttp(*proxyListener)
+          .eagerlyEvaluate([this](kj::Exception&& e) {
+        context.exitError(kj::str("** HTTP-BRIDGE: Outgoing HTTP proxy died; aborting:\n", e));
       });
 
       exitPromise.wait(ioContext.waitScope);

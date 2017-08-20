@@ -17,7 +17,7 @@
 const PowerboxOptions = new Mongo.Collection("powerboxOptions");
 
 SandstormPowerboxRequest = class SandstormPowerboxRequest {
-  constructor(db, requestInfo) {
+  constructor(db, requestInfo, GrainView) {
     check(requestInfo, Match.ObjectIncluding({
       source: Match.Any,
       origin: Match.Any,
@@ -41,6 +41,10 @@ SandstormPowerboxRequest = class SandstormPowerboxRequest {
     this._selectedProvider = new ReactiveVar(undefined);
 
     this._requestId = Random.id();
+
+    this._finalizers = [];
+
+    this.GrainView = GrainView;
   }
 
   subscribe(tmpl) {
@@ -50,6 +54,9 @@ SandstormPowerboxRequest = class SandstormPowerboxRequest {
   }
 
   finalize() {
+    this._finalizers.forEach(f => f());
+    this._finalizers = [];
+
     if (!this._completed) {
       // postMessage back to the origin frame that the request was cancelled.
       this._requestInfo.source.postMessage({
@@ -60,15 +67,29 @@ SandstormPowerboxRequest = class SandstormPowerboxRequest {
     }
   }
 
+  onFinalize(cb) {
+    this._finalizers.push(cb);
+  }
+
+  getQuery() {
+    return this._requestInfo.query || [];
+  }
+
+  getSessionId() {
+    return this._requestInfo.sessionId;
+  }
+
   completeRequest(token, descriptor) {
-    this._completed = true;
-    this._requestInfo.source.postMessage({
-      rpcId: this._requestInfo.rpcId,
-      token: token,
-      descriptor: descriptor,
-    }, this._requestInfo.origin);
-    // Completion event closes popup.
-    this._requestInfo.onCompleted();
+    if (!this._completed) {
+      this._completed = true;
+      this._requestInfo.source.postMessage({
+        rpcId: this._requestInfo.rpcId,
+        token: token,
+        descriptor: descriptor,
+      }, this._requestInfo.origin);
+      // Completion event closes popup.
+      this._requestInfo.onCompleted();
+    }
   }
 
   cancelRequest() {
@@ -246,34 +267,6 @@ const compileMatchFilter = function (searchString) {
   };
 };
 
-const prepareViewInfoForDisplay = function (viewInfo) {
-  const result = _.clone(viewInfo || {});
-  if (result.permissions) indexElements(result.permissions);
-  // It's essential that we index the roles *before* hiding obsolete roles,
-  // or else we'll produce the incorrect roleAssignment for roles that are
-  // described after obsolete roles in the pkgdef.
-  if (result.roles) {
-    indexElements(result.roles);
-    result.roles = removeObsolete(result.roles);
-  }
-
-  return result;
-};
-
-const indexElements = function (arr) {
-  // Helper function to annotate an array of objects with their indices
-  for (let i = 0; i < arr.length; i++) {
-    arr[i].index = i;
-  }
-};
-
-const removeObsolete = function (arr) {
-  // remove entries from the list that are flagged as obsolete
-  return _.filter(arr, function (el) {
-    return !el.obsolete;
-  });
-};
-
 Template.powerboxRequest.onCreated(function () {
   this.autorun(() => {
     const request = this.data.get();
@@ -367,124 +360,3 @@ Template.powerboxRequest.events({
     this.powerboxRequest.selectCard(this);
   },
 });
-
-// =======================================================================================
-// Templates for specific request types.
-//
-// TODO(cleanup): Find a better home for these.
-
-Template.grainPowerboxCard.powerboxIconSrc = card => {
-  return card.grainInfo.iconSrc;
-};
-
-Template.uiViewPowerboxConfiguration.onCreated(function () {
-  this._viewInfo = new ReactiveVar({});
-
-  // Fetch the view info for the grain.
-  if (this.data.grainInfo.cachedViewInfo) {
-    this._viewInfo.set(prepareViewInfoForDisplay(this.data.grainInfo.cachedViewInfo));
-  } else if (this.data.grainInfo.apiTokenId) {
-    Meteor.call("getViewInfoForApiToken", this.data.grainInfo.apiTokenId, (err, result) => {
-      if (err) {
-        console.log(err);
-        this.data.powerboxRequest.failRequest(err);
-      } else {
-        this._viewInfo.set(prepareViewInfoForDisplay(result));
-      }
-    });
-  }
-});
-
-Template.uiViewPowerboxConfiguration.helpers({
-  viewInfo: function () {
-    return Template.instance()._viewInfo.get();
-  },
-});
-
-Template.uiViewPowerboxConfiguration.events({
-  "click .connect-button": function (event) {
-    event.preventDefault();
-    const selectedInput = Template.instance().find('form input[name="role"]:checked');
-    if (selectedInput) {
-      let roleAssignment;
-      if (selectedInput.value === "all") {
-        roleAssignment = { allAccess: null };
-      } else {
-        const role = parseInt(selectedInput.value, 10);
-        roleAssignment = { roleId: role };
-      }
-
-      this.powerboxRequest.completeUiView(this.option.grainId, roleAssignment);
-    }
-  },
-});
-
-const isSubsetOf = function (p1, p2) {
-  for (let idx = 0; idx < p1.length; ++idx) {
-    if (p1[idx] && !p2[idx]) {
-      return false;
-    }
-  }
-
-  return true;
-};
-
-Template.identityPowerboxConfiguration.helpers({
-  sufficientRoles: function () {
-    const requestedPermissions = this.option.requestedPermissions;
-
-    const session = this.db.collections.sessions.findOne(
-      { _id: this.powerboxRequest._requestInfo.sessionId, });
-    const roles = prepareViewInfoForDisplay(session.viewInfo).roles;
-
-    return roles && roles.filter(r => isSubsetOf(requestedPermissions, r.permissions));
-  },
-});
-
-Template.identityPowerboxConfiguration.events({
-  "click .connect-button": function (event, instance) {
-    event.preventDefault();
-    const selectedInput = instance.find('form input[name="role"]:checked');
-    if (selectedInput) {
-      let roleAssignment;
-      if (selectedInput.value === "all") {
-        roleAssignment = { allAccess: null };
-      } else {
-        const role = parseInt(selectedInput.value, 10);
-        roleAssignment = { roleId: role };
-      }
-
-      this.powerboxRequest.completeNewFrontendRef({
-        identity: {
-          id: instance.data.option.frontendRef.identity,
-          roleAssignment,
-        },
-      });
-    }
-  },
-});
-
-Template.identityPowerboxCard.powerboxIconSrc = card => {
-  return card.option.profile.pictureUrl;
-};
-
-Template.emailVerifierPowerboxCard.helpers({
-  serviceTitle: function () {
-    const services = this.option.frontendRef.emailVerifier.services;
-    const name = services[0];
-    const service = Accounts.identityServices[name];
-    if (service.loginTemplate.name === "oauthLoginButton") {
-      return service.loginTemplate.data.displayName;
-    } else if (name === "email") {
-      return "passwordless e-mail login";
-    } else if (name === "ldap") {
-      return "LDAP";
-    } else {
-      return name;
-    }
-  },
-});
-
-Template.emailVerifierPowerboxCard.powerboxIconSrc = () => "/email-m.svg";
-Template.verifiedEmailPowerboxCard.powerboxIconSrc = () => "/email-m.svg";
-Template.addNewVerifiedEmailPowerboxCard.powerboxIconSrc = () => "/add-email-m.svg";

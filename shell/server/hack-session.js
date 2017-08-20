@@ -20,8 +20,9 @@ const Https = Npm.require("https");
 const Net = Npm.require("net");
 const Dgram = Npm.require("dgram");
 const Capnp = Npm.require("capnp");
-import { hashSturdyRef, checkRequirements } from "/imports/server/persistent.js";
+import { hashSturdyRef, checkRequirements, fetchApiToken } from "/imports/server/persistent.js";
 import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
+import { ssrfSafeLookup } from "/imports/server/networking.js";
 
 const EmailRpc = Capnp.importSystem("sandstorm/email.capnp");
 const HackSessionContext = Capnp.importSystem("sandstorm/hack-session.capnp").HackSessionContext;
@@ -30,6 +31,7 @@ const SystemPersistent = Capnp.importSystem("sandstorm/supervisor.capnp").System
 const IpRpc = Capnp.importSystem("sandstorm/ip.capnp");
 const EmailSendPort = EmailRpc.EmailSendPort;
 const Grain = Capnp.importSystem("sandstorm/grain.capnp");
+const Powerbox = Capnp.importSystem("sandstorm/powerbox.capnp");
 
 const Url = Npm.require("url");
 
@@ -46,13 +48,8 @@ SessionContextImpl = class SessionContextImpl {
 
   claimRequest(sturdyRef, requiredPermissions) {
     return inMeteor(() => {
-      const hashedSturdyRef = hashSturdyRef(sturdyRef);
-
-      const token = ApiTokens.findOne({
-        _id: hashedSturdyRef,
-        "owner.clientPowerboxRequest.grainId": this.grainId,
-        "owner.clientPowerboxRequest.sessionId": this.sessionId,
-      });
+      const token = fetchApiToken(globalDb, sturdyRef,
+        { "owner.clientPowerboxRequest.sessionId": this.sessionId });
 
       if (!token) {
         throw new Error("no such token");
@@ -94,20 +91,24 @@ SessionContextImpl = class SessionContextImpl {
       }
 
       return restoreInternal(
-          globalDb,
-          new Buffer(sturdyRef),
-          { clientPowerboxRequest: Match.ObjectIncluding({ grainId: this.grainId }) },
+          globalDb, sturdyRef,
+          { clientPowerboxRequest: Match.ObjectIncluding({ sessionId: this.sessionId }) },
           requirements, token);
     });
   }
 
-  offer(cap, requiredPermissions, descriptor, displayInfo) {
+  _offerOrFulfill(isFulfill, cap, requiredPermissions, descriptor, displayInfo) {
     return inMeteor(() => {
 
       const session = Sessions.findOne({ _id: this.sessionId });
 
       if (!session.identityId && !session.hashedToken) {
         throw new Error("Session has neither an identityId nor a hashedToken.");
+      }
+
+      if (isFulfill && !session.powerboxRequest) {
+        // Not a request session, so treat fulfillRequest() same as offer().
+        isFulfill = false;
       }
 
       const castedCap = cap.castAs(SystemPersistent);
@@ -122,9 +123,7 @@ SessionContextImpl = class SessionContextImpl {
         }
 
         if (!tagValue.title) {
-          // TODO(someday): We should arguably throw here, but the collections app currently
-          //   fails to provide a title.
-          tagValue.title = "offer()ed grain had no title";
+          throw new Error("No value provided for UiView.PowerboxTag.title.");
         }
 
         if (session.identityId) {
@@ -135,6 +134,15 @@ SessionContextImpl = class SessionContextImpl {
             },
           };
         }
+      }
+
+      if (isFulfill) {
+        // The capability will pass directly to the requesting grain.
+        apiTokenOwner = {
+          clientPowerboxRequest: {
+            sessionId: session.powerboxRequest.requestingSession,
+          },
+        };
       }
 
       // TODO(soon): This will eventually use SystemPersistent.addRequirements when membranes
@@ -166,13 +174,21 @@ SessionContextImpl = class SessionContextImpl {
       ApiTokens.update({ _id: hashSturdyRef(sturdyRef) }, { $push: { requirements: requirement } });
 
       let powerboxView;
-      if (isUiView) {
+      if (isFulfill) {
+        powerboxView = {
+          fulfill: {
+            token: sturdyRef.toString(),
+            descriptor: Capnp.serializePacked(Powerbox.PowerboxDescriptor, descriptor)
+                             .toString("base64"),
+          },
+        };
+      } else if (isUiView) {
         if (session.identityId) {
           // Deduplicate.
-          let tokenId = hashSturdyRef(sturdyRef.toString());
-          const newApiToken = ApiTokens.findOne({ _id: tokenId });
+          const newApiToken = fetchApiToken(globalDb, sturdyRef.toString());
+          let tokenId = newApiToken._id;
           const dupeQuery = _.pick(newApiToken, "grainId", "roleAssignment", "requirements",
-                                   "parentToken", "identityId", "accountId");
+                                   "parentToken", "parentTokenKey", "identityId", "accountId");
           dupeQuery._id = { $ne: newApiToken._id };
           dupeQuery["owner.user.identityId"] = this.identityId;
           dupeQuery.trashed = { $exists: false };
@@ -204,6 +220,14 @@ SessionContextImpl = class SessionContextImpl {
         },
       );
     });
+  }
+
+  offer(cap, requiredPermissions, descriptor, displayInfo) {
+    return this._offerOrFulfill(false, cap, requiredPermissions, descriptor, displayInfo);
+  }
+
+  fulfillRequest(cap, requiredPermissions, descriptor, displayInfo) {
+    return this._offerOrFulfill(true, cap, requiredPermissions, descriptor, displayInfo);
   }
 
   activity(event) {
@@ -249,7 +273,7 @@ Meteor.methods({
       throw new Meteor.Error(400, "Invalid webkey: token doesn't match hostname.");
     }
 
-    const cap = restoreInternal(db, new Buffer(token),
+    const cap = restoreInternal(db, token,
                                 Match.Optional({ webkey: Match.Optional(Match.Any) }), []).cap;
     const castedCap = cap.castAs(SystemPersistent);
     const owner = {
@@ -388,68 +412,76 @@ HackSessionContextImpl = class HackSessionContextImpl extends SessionContextImpl
     const _this = this;
     const session = _this;
 
-    return new Promise((resolve, reject) => {
-      let requestMethod = Http.request;
-      if (url.indexOf("https://") === 0) {
-        requestMethod = Https.request;
-      } else if (url.indexOf("http://") !== 0) {
-        err = new Error("Protocol not recognized.");
-        err.nature = "precondition";
-        reject(err);
-      }
-
-      req = requestMethod(url, (resp) => {
-        const buffers = [];
-        let err;
-
-        switch (Math.floor(resp.statusCode / 100)) {
-          case 2: // 2xx response -- OK.
-            resp.on("data", (buf) => {
-              buffers.push(buf);
-            });
-
-            resp.on("end", () => {
-              resolve({
-                content: Buffer.concat(buffers),
-                mimeType: resp.headers["content-type"] || null,
-              });
-            });
-            break;
-          case 3: // 3xx response -- redirect.
-            resolve(session.httpGet(resp.headers.location));
-            break;
-          case 4: // 4xx response -- client error.
-            err = new Error("Status code " + resp.statusCode + " received in response.");
-            err.nature = "precondition";
-            reject(err);
-            break;
-          case 5: // 5xx response -- internal server error.
-            err = new Error("Status code " + resp.statusCode + " received in response.");
-            err.nature = "localBug";
-            reject(err);
-            break;
-          default: // ???
-            err = new Error("Invalid status code " + resp.statusCode + " received in response.");
-            err.nature = "localBug";
-            reject(err);
-            break;
+    return inMeteor(() => {
+      return ssrfSafeLookup(globalDb, url);
+    }).then(safe => {
+      return new Promise((resolve, reject) => {
+        let requestMethod = Http.request;
+        if (safe.url.indexOf("https://") === 0) {
+          requestMethod = Https.request;
+        } else if (safe.url.indexOf("http://") !== 0) {
+          err = new Error("Protocol not recognized.");
+          err.nature = "precondition";
+          reject(err);
         }
-      });
 
-      req.on("error", (e) => {
-        e.nature = "networkFailure";
-        reject(e);
-      });
+        const options = Url.parse(safe.url);
+        options.headers = { host: safe.host };
+        options.servername = safe.host.split(":")[0];
 
-      req.setTimeout(15000, () => {
-        req.abort();
-        err = new Error("Request timed out.");
-        err.nature = "localBug";
-        err.durability = "overloaded";
-        reject(err);
-      });
+        req = requestMethod(options, (resp) => {
+          const buffers = [];
+          let err;
 
-      req.end();
+          switch (Math.floor(resp.statusCode / 100)) {
+            case 2: // 2xx response -- OK.
+              resp.on("data", (buf) => {
+                buffers.push(buf);
+              });
+
+              resp.on("end", () => {
+                resolve({
+                  content: Buffer.concat(buffers),
+                  mimeType: resp.headers["content-type"] || null,
+                });
+              });
+              break;
+            case 3: // 3xx response -- redirect.
+              resolve(session.httpGet(resp.headers.location));
+              break;
+            case 4: // 4xx response -- client error.
+              err = new Error("Status code " + resp.statusCode + " received in response.");
+              err.nature = "precondition";
+              reject(err);
+              break;
+            case 5: // 5xx response -- internal server error.
+              err = new Error("Status code " + resp.statusCode + " received in response.");
+              err.nature = "localBug";
+              reject(err);
+              break;
+            default: // ???
+              err = new Error("Invalid status code " + resp.statusCode + " received in response.");
+              err.nature = "localBug";
+              reject(err);
+              break;
+          }
+        });
+
+        req.on("error", (e) => {
+          e.nature = "networkFailure";
+          reject(e);
+        });
+
+        req.setTimeout(15000, () => {
+          req.abort();
+          err = new Error("Request timed out.");
+          err.nature = "localBug";
+          err.durability = "overloaded";
+          reject(err);
+        });
+
+        req.end();
+      });
     });
   }
 
@@ -483,9 +515,9 @@ HackSessionContextImpl = class HackSessionContextImpl extends SessionContextImpl
       const hostId = matchWildcardHost(parsedUrl.host);
       // Connecting to a remote server with a bearer token.
       // TODO(someday): Negotiate server-to-server Cap'n Proto connection.
-      return { view: new ExternalUiView(url, this.grainId, token) };
+      return { view: new ExternalUiView(url, token) };
     } else {
-      return { view: new ExternalUiView(url, this.grainId) };
+      return { view: new ExternalUiView(url) };
     }
   }
 };

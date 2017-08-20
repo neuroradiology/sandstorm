@@ -492,6 +492,11 @@ body>.main-content>.account {
     padding: 5px;
   }
 
+  p.alert-identity-refactor {
+    color: red;
+    padding-left: 5px;
+  }
+
   .identities-and-editor {
     @media #{$not-mobile-only} {
       width: 660px;
@@ -1598,7 +1603,6 @@ body>.popup.billing-prompt>.frame-container>.frame, .first-time-billing-prompt {
 .identity-login-interstitial {
   z-index: 1;
   background-color: #efefef;
-  height: 100%;
   div.centered-content{
     margin: auto;
     text-align: center;

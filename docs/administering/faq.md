@@ -624,16 +624,11 @@ but you want a power-efficient small computer that runs Sandstorm, see the links
 
 ## Is Sandstorm ready for production use? Is it in beta?
 
-Sandstorm, and Sandstorm for Work, are ready for production use.
-
-On August 31, 2016, we announced that our [self-hostable Sandstorm for Work
-product](https://sandstorm.io/news/2016-08-31-sandstorm-for-work-ready) is ready.  We rely on
-Sandstorm extensively for our day-to-day work including project management, collaboration, and file
-management, as do many other individuals and companies.  As with any software product, there are
-plenty of things on our roadmap that we intend to add or improve over time, but the core
-functionality has been stable for a while.
-
-Our hosted offering, Oasis, is still marked beta, but we intend for it to graduate soon.
+Sandstorm is ready for production use, and is used by thousands of users for real work every day.
+The Sandstorm team itself relies on Sandstorm extensively for our day-to-day work including project
+management, collaboration, and file management, as do many other individuals and companies. As with
+any software product, there are plenty of things on our roadmap that we intend to add or improve
+over time, but the core functionality has been stable for a while.
 
 ## Can I run Sandstorm on a totally-offline server or airgapped network?
 
@@ -720,3 +715,14 @@ response whose format surprises Sandstorm.
 
 Sandstorm logs this event since it could indicate a configuration problem if it occurred for a
 domain name that **should** be served from this Sandstorm server.
+
+## How do I notify the owner of a resource-hogging process?
+
+1. Identify the process via `top`.
+2. `cat /proc/<pid>/mountinfo` and find the mapping that looks like `/opt/sandstorm/var/sandstorm/grains/<grain-id>/sandbox /var`. This gives you the grain ID.
+3. `sudo sandstorm mongo` to get to the Sandstorm mongo shell.
+4. `db.grains.find({_id: "<grain-id>"})` to get info about the grain. In particular, the `userId` is shown.
+5. `db.users.find({_id: "<user-id>"})` to get the user record. Look for the list of `loginIdentities`, and take the first ID shown.
+6. `db.users.find({_id: "<login-identity-id>"})` to get info about the user identity.
+
+This should show you the user's profile info including e-mail address, etc.
