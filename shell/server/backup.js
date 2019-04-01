@@ -18,7 +18,6 @@ import { waitPromise } from "/imports/server/async-helpers.js";
 
 const ChildProcess = Npm.require("child_process");
 const Future = Npm.require("fibers/future");
-const Capnp = Npm.require("capnp");
 
 const GrainInfo = Capnp.importSystem("sandstorm/grain.capnp").GrainInfo;
 
@@ -61,6 +60,7 @@ Meteor.methods({
     // TODO(soon): does the grain need to be offline?
 
     const grainInfo = _.pick(grain, "appId", "appVersion", "title");
+    grainInfo.ownerIdentityId = grain.identityId;
 
     FileTokens.insert(token);
     waitPromise(globalBackend.cap().backupGrain(token._id, this.userId, grainId, grainInfo));
@@ -88,9 +88,8 @@ Meteor.methods({
     return token._id;
   },
 
-  restoreGrain(tokenId, identityId) {
+  restoreGrain(tokenId, obsolete) {
     check(tokenId, String);
-    check(identityId, String);
     const token = FileTokens.findOne(tokenId);
     if (!token || !isSignedUpOrDemo()) {
       throw new Meteor.Error(403, "Unauthorized",
@@ -151,13 +150,19 @@ Meteor.methods({
                                ", Old version: " + appVersion);
       }
 
+      console.log(grainInfo);
+
       Grains.insert({
         _id: grainId,
         packageId: packageId,
         appId: grainInfo.appId,
         appVersion: appVersion,
         userId: this.userId,
-        identityId: identityId,
+        // For older backups that don't have the owner's identity ID, use the owner's identicon
+        // ID which is based on old-style global identity IDs.
+        identityId: grainInfo.ownerIdentityId ||
+            (Meteor.user().profile || {}).identicon ||
+            SandstormDb.generateIdentityId(),
         title: grainInfo.title,
         private: true,
         size: 0,
