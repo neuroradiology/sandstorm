@@ -74,6 +74,15 @@ fail() {
   fi
   error "$@"
   echo "" >&2
+
+  if [ "$error_code" = E_CURL_MISSING ] ; then
+    # There's no point in asking the user if they want to report an issue, since
+    # (1) there isn't one, they just need to install curl, and (2) doing so will
+    # fail anyway, since we use curl to send the report. We've already displayed
+    # the error, so just exit now.
+    exit 1
+  fi
+
   # Users can export REPORT=no to avoid the error-reporting behavior, if they need to.
   if [ "${REPORT:-yes}" = "yes" ] ; then
     if USE_DEFAULTS=no prompt-yesno "Hmm, installation failed. Would it be OK to send an anonymous error report to the sandstorm.io team so we know something is wrong?
@@ -1165,13 +1174,28 @@ create_server_user_if_needed() {
 
   # OK! Let's proceed.
   #
-  # useradd comes from the passwd package, whereas adduser is a Debian-specific utility
-  # <https://packages.debian.org/adduser>, so we prefer useradd here. Per the man page for useradd,
-  # USERGROUPS_ENAB in /etc/login.defs controls if useradd will automatically create a group for
-  # this user (the new group would have the same name as the new user). On systems such as OpenSuSE
-  # where that flag is set to false by default, or on systems where the administrator has personally
-  # tuned that flag, we need to provide --user-group to useradd so that it creates the group.
-  useradd --system --user-group "$SERVER_USER"
+  # To create the server user, we first try `useradd`, which is widely available on most
+  # distros. If that isn't available, it's likely we're running on a busybox based system.
+  # busybox provides an `adduser` applet, so if that command links to the busybox binary
+  # we it instead.
+  #
+  # Note that debian provides an `adduser` command as well, but its usage is different.
+  # useradd is available on debian anyway, so we'll end up using that.
+  if which useradd >/dev/null; then
+    # Per the man page for useradd, USERGROUPS_ENAB in /etc/login.defs controls if useradd
+    # will automatically create a group for this user (the new group would have the same
+    # name as the new user). On systems such as OpenSuSE where that flag is set to false
+    # by default, or on systems where the administrator has personally tuned that flag,
+    # we need to provide --user-group to useradd so that it creates the group.
+    useradd --system --user-group "$SERVER_USER"
+  elif [ "$(basename $(readlink $(which adduser)))" = busybox ]; then
+    # With busybox we need to separately create the user's group.
+    addgroup -S "$SERVER_USER"
+    adduser -S -G "$SERVER_USER" "$SERVER_USER"
+  else
+    fail "E_NO_USERADD" \
+      "Couldn't find a command with which to add a user (either useradd or busybox)."
+  fi
 
   echo "Note: Sandstorm's storage will only be accessible to the group '$SERVER_USER'."
 
@@ -1528,8 +1552,9 @@ configure_systemd_init_system() {
   cat > /etc/systemd/system/$SYSTEMD_UNIT << __EOF__
 [Unit]
 Description=Sandstorm server
-After=local-fs.target remote-fs.target network.target
-Requires=local-fs.target remote-fs.target network.target
+After=local-fs.target remote-fs.target network-online.target
+Requires=local-fs.target remote-fs.target
+Wants=network-online.target
 
 [Service]
 Type=forking

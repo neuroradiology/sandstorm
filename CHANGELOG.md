@@ -1,3 +1,76 @@
+### v0.262 (2020-04-11)
+- Updated dependencies, including Meteor to 1.10.1.
+- `shm_open()` and friends can now be used in Sandstorm app sandboxes (because `/dev/shm` is now created as a temporary directory). Thanks @zenhack.
+- `spk dev` now displays the server's URL for convenience. Thanks @zenhack.
+- Sandstorm now publishes a `robots.txt` blocking all robots. Thanks @zenhack.
+- Lots of internal refactoring by @zenhack and @zarvox.
+- A new postMessage-based endpoint allows a grain to get its own title. Thanks @zenhack.
+
+### v0.261 (2020-03-15)
+- Updated dependencies, including Meteor to 1.9.3 and Node.js to 12.16.1 (both major updates).
+- New "AppHooks" feature in sandstorm-http-bridge allows bridge-based apps to get access to more low-level Cap'n Proto APIs. Contributed by Ian "@zenhack" Denhardt.
+- Fixed a bug in `spk dev` that often made Go-based servers crash when accessing disk files. (This problem only occurred in dev mode.)
+- Updated Dutch (thanks @FreekDankelman) and Simplied Chinese translation (thanks @misaka00251).
+- Significant internal refactoring.
+
+### v0.260 (2020-02-15)
+- Updated dependencies.
+- Internationalized "mass transfers" page, and translated to Finnish. Thanks to Laurie "xet7" Ojansivu for this change.
+- Tweaked systemd unit file (only affects new installs).
+- Typo fixes.
+- Many documentation improvements (on [docs.sandstorm.io](https://docs.sandstorm.io)).
+
+### v0.259 (2020-02-01)
+- Disabled ability to upgrade demo accounts to full accounts on private servers, so that we can change the Sandstorm demo over to run on Alpha.
+- This version will be skipped by auto-update since this update is only needed on Sandstorm Alpha.
+
+### v0.258 (2020-02-01)
+- Updated demo sidebar language to reflect Oasis shutdown.
+- This version will be skipped by auto-update since this update is only needed on Sandstorm Alpha.
+
+### v0.257 (2020-01-19)
+- New feature: Apps can now schedule background tasks. Thanks to Ian "zenhack" Denhardt for completing this feature (originally started by David Renshaw).
+- Improved code that matches HTTP API powerbox requests against known OAuth APIs, especially GitHub (credit again to Ian Denhardt).
+
+### v0.256 (2019-12-25) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.255 (2019-11-23) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.254 (2019-10-27) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.253 (2019-09-28)
+- Oasis: Added warnings to the UI and invoice e-mails regarding the upcoming shutdown of Oasis.
+- Updated dependencies.
+
+### v0.252 (2019-09-08)
+- Fixed bug introduced in 0.251 causing development apps registered via `spk dev` to report "This grain's app package is not installed".
+
+### v0.251 (2019-09-02)
+- Added functionality to allow mass transferring of grains between servers. Click the "Mass transfer..." button above the grains list to initiate a transfer.
+- Updated dependencies.
+
+### v0.250 (2019-08-10)
+- Fixed multiple problems where a user who has access to a grain might unexpectedly be assigned an all-new identity within the grain, especially after backup/restore. This should make it more practical to move shared grains between servers using backup/restore. [See the pull request for a complete explanation.](https://github.com/sandstorm-io/sandstorm/pull/3148)
+- Updated dependencies.
+
+### v0.249 (2019-07-10) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.248 (2019-06-09) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.247 (2019-05-11) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.246 (2019-04-13) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.245 (2019-03-16) [bugfixes]
+- Updated dependencies. (No other changes.)
+
 ### v0.244 (2019-02-09) [bugfixes]
 - Updated dependencies. (No other changes.)
 

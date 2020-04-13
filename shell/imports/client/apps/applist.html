@@ -1,0 +1,101 @@
+<template name="sandstormAppListPage">
+  {{setDocumentTitle}}
+  {{#sandstormTopbarItem name="title" priority=5 topbar=globalTopbar }}{{_ "apps.title"}}{{/sandstormTopbarItem}}
+  {{#if isSignedUpOrDemo}}
+  <div class="app-list">
+    {{#if freePlanGoingAway}}
+      <div class="free-plan-going-away">
+        <button class="upgrade-plan-now button-primary">Upgrade now</button>
+        Starting October 14, 2018, the Free plan will no longer allow creating grains, only accessing grains shared by others. Pre-existing data will remain available for download. <a href="https://sandstorm.io/news/2018-08-27-discontinuing-free-plan" target="_blank">Learn more »</a>
+      </div>
+    {{/if}}
+
+    {{#if oasisShuttingDown}}
+      <div class="oasis-shutting-down">
+        Sandstorm Oasis will shut down on December 31, 2019. Consider <a href="/transfers">transfering</a>
+        your data to a self-hosted server.
+        <a href="https://sandstorm.io/news/2019-09-15-shutting-down-oasis" target="_blank">Learn more »</a>
+      </div>
+    {{/if}}
+
+    <h1>{{_ "apps.title"}}
+      <form class="standard-form">
+        <div class="button-row">
+          {{#if uninstalling}}
+            <button type="button" class="toggle-uninstall" title="{{_ "apps.appList.uninstallingHint"}}">{{_ "apps.appList.doneUninstalling"}}</button>
+          {{else}}
+            <button type="button" class="toggle-uninstall {{#unless actionsCount}}hide{{/unless}}"
+                    title="{{_ "apps.appList.uninstallHint"}}"
+            >{{_ "apps.appList.uninstallButton"}}</button>
+          {{/if}}
+          <button type="button" class="upload-button">{{_ "apps.appList.uploadApp"}}
+            <input type="file" style="display:none" accept=".spk">
+          </button>
+        </div>
+      </form>
+    </h1>
+
+    <div class="search-row">
+      <label>
+        <span class="search-icon" title="{{_ "apps.appList.searchHint"}}"></span>
+        <input class="search-bar" type="text" placeholder="{{_ "apps.appList.search"}}" value="{{ searchText }}" />
+      </label>
+    </div>
+
+    {{#if showMostPopular}}
+    <div class="popular-container">
+      <h2 class="">{{_ "apps.appList.mostUsed"}}</h2>
+      {{#each popularApps }}
+
+      <a class="app-button {{#if dev}}dev-background {{/if}}" href="/apps/{{appId}}">
+        <div class="app-icon" style="background-image: url('{{ iconSrc }}');"></div>
+        <span class="app-title">{{appTitle}}</span>
+        <span class="action-text">{{shortDescription}}</span>
+      </a>
+      {{/each}}
+    </div>
+
+    <h2 class="all-apps">{{_ "apps.appList.allApps"}}</h2>
+    {{/if}}
+
+    <a class="app-button install-button {{#if searching}}hide{{/if}}" href="{{appMarketUrl}}">
+      <div class="app-icon pseudoapp install-icon"></div>
+      <span class="action-title">{{_ "apps.appList.install"}}</span>
+      <span class="action-text">{{_ "apps.appList.fromMarket"}}</span>
+    </a>
+
+    {{!-- data-app-id is only used for testing purposes --}}
+    {{#each apps }}
+    {{#if uninstalling}}
+    <button class="app-button uninstall-action"
+            data-app-id="{{appId}}">
+      <div class="app-icon" style="background-image: url('{{ iconSrc }}');"></div>
+      <span class="app-title">{{appTitle}}</span>
+      <span class="action-text">{{_ "apps.appList.uninstall"}}</span>
+    </button>
+    {{else}}
+    <a class="app-button {{#if dev}}dev-background {{/if}}" href="/apps/{{appId}}"
+            data-app-id="{{appId}}">
+      <div class="app-icon" style="background-image: url('{{ iconSrc }}');"></div>
+      <span class="app-title">{{appTitle}}</span>
+      <span class="action-text">{{shortDescription}}</span>
+    </a>
+    {{/if}}
+    {{/each}}
+    {{#if searching}}
+    {{#unless apps}}
+    <p class="no-matching-app">
+      {{{_ "apps.appList.noMatchApp" url=appMarketUrl}}}
+    </p>
+    {{/unless}}
+    {{/if}}
+  </div>
+  {{else}}
+    {{#if Template.subscriptionsReady}}
+      <div class="not-signed-up">
+        <h1>{{_ "apps.appList.unauthorized"}}</h1>
+        <p>{{_ "apps.appList.unauthorizedText"}}</p>
+      </div>
+    {{/if}}
+  {{/if}}
+</template>

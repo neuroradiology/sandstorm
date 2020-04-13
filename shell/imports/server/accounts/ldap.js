@@ -1,11 +1,14 @@
-const Future = Npm.require("fibers/future");
+import Future from "fibers/future";
 import ldapjs from "ldapjs";
+
+import { Meteor } from "meteor/meteor";
+import { _ } from "meteor/underscore";
 
 // At a minimum, set up LDAP_DEFAULTS.url and .dn according to
 // your needs. url should appear as 'ldap://your.url.here'
 // dn should appear in normal ldap format of comma separated attribute=value
 // e.g. 'uid=someuser,cn=users,dc=somevalue'
-LDAP_DEFAULTS = {
+const LDAP_DEFAULTS = {
   url: false,
   port: "389",
   dn: false,
@@ -26,7 +29,7 @@ LDAP_DEFAULTS = {
 function LDAP() {
   // Set options
   this.options = _.clone(LDAP_DEFAULTS);
-};
+}
 
 /**
  * Attempt to bind (authenticate) ldap

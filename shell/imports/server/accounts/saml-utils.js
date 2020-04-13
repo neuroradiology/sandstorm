@@ -7,6 +7,8 @@ import xmlCrypto from "xml-crypto";
 import xmldom from "xmldom";
 import zlib from "zlib";
 
+import { Meteor } from "meteor/meteor";
+
 const HOSTNAME = Url.parse(process.env.ROOT_URL).hostname;
 
 const SAML = function (options) {
@@ -227,7 +229,7 @@ SAML.prototype.validateResponse = function (samlResponse, callback) {
         return callback(new Error("Missing SAML assertion"), null, false, xml);
       }
 
-      profile = {};
+      const profile = {};
 
       if (response.$ && response.$.InResponseTo) {
         profile.inResponseToId = response.$.InResponseTo;
