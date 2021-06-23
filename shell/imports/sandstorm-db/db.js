@@ -152,11 +152,13 @@ const collectionOptions = { defineMutationMethods: Meteor.isClient };
 
 Meteor.users.ensureIndexOnServer("services.google.email", { sparse: 1 });
 Meteor.users.ensureIndexOnServer("services.github.emails.email", { sparse: 1 });
+Meteor.users.ensureIndexOnServer("services.oidc.email", { sparse: 1 });
 Meteor.users.ensureIndexOnServer("services.email.email", { unique: 1, sparse: 1 });
 Meteor.users.ensureIndexOnServer("loginCredentials.id", { unique: 1, sparse: 1 });
 Meteor.users.ensureIndexOnServer("nonloginCredentials.id", { sparse: 1 });
 Meteor.users.ensureIndexOnServer("services.google.id", { unique: 1, sparse: 1 });
 Meteor.users.ensureIndexOnServer("services.github.id", { unique: 1, sparse: 1 });
+Meteor.users.ensureIndexOnServer("services.oidc.id", { sparse: 1 });
 Meteor.users.ensureIndexOnServer("suspended.willDelete", { sparse: 1 });
 
 const Packages = new Mongo.Collection("packages", collectionOptions);
@@ -981,28 +983,6 @@ const calculateReferralBonus = function (user) {
   }
 };
 
-function isAdmin() {
-  // Returns true if the user is the administrator.
-
-  const user = Meteor.user();
-  if (user && user.isAdmin) {
-    return true;
-  } else {
-    return false;
-  }
-}
-
-function isAdminById(id) {
-  // Returns true if the user's id is the administrator.
-
-  const user = Meteor.users.findOne({ _id: id }, { fields: { isAdmin: 1 } });
-  if (user && user.isAdmin) {
-    return true;
-  } else {
-    return false;
-  }
-}
-
 function findAdminUserForToken(token) {
   if (!token.requirements) {
     return;
@@ -1099,73 +1079,82 @@ function makeApiHost(token) {
   return makeWildcardHost(apiHostIdForToken(token));
 }
 
-function SandstormDb(quotaManager) {
-  // quotaManager is an object with the following method:
-  //   updateUserQuota: It is provided two arguments
-  //     db: This SandstormDb object
-  //     user: A collections.users account object
-  //   and returns a quota object:
-  //     storage: A number (can be Infinity)
-  //     compute: A number (can be Infinity)
-  //     grains: A number (can be Infinity)
+class SandstormDb {
+  constructor(quotaManager) {
+    // quotaManager is an object with the following method:
+    //   updateUserQuota: It is provided two arguments
+    //     db: This SandstormDb object
+    //     user: A collections.users account object
+    //   and returns a quota object:
+    //     storage: A number (can be Infinity)
+    //     compute: A number (can be Infinity)
+    //     grains: A number (can be Infinity)
 
-  this.quotaManager = quotaManager;
-  this.collections = {
-    // Direct access to underlying collections. DEPRECATED, but better than accessing the top-level
-    // collection globals directly.
-    //
-    // TODO(cleanup): Over time, we will provide methods covering each supported query and remove
-    //   direct access to the collections.
-    users: Meteor.users,
+    this.quotaManager = quotaManager;
+    this.collections = {
+      // Direct access to underlying collections. DEPRECATED, but better than accessing the top-level
+      // collection globals directly.
+      //
+      // TODO(cleanup): Over time, we will provide methods covering each supported query and remove
+      //   direct access to the collections.
+      users: Meteor.users,
 
-    packages: Packages,
-    devPackages: DevPackages,
-    userActions: UserActions,
-    grains: Grains,
-    roleAssignments: RoleAssignments, // Deprecated, only used by the migration that eliminated it.
-    contacts: Contacts,
-    sessions: Sessions,
-    signupKeys: SignupKeys,
-    activityStats: ActivityStats,
-    deleteStats: DeleteStats,
-    fileTokens: FileTokens,
-    spkTokens: SpkTokens,
-    apiTokens: ApiTokens,
-    apiHosts: ApiHosts,
-    notifications: Notifications,
-    activitySubscriptions: ActivitySubscriptions,
-    statsTokens: StatsTokens,
-    misc: Misc,
-    settings: Settings,
-    migrations: Migrations,
-    staticAssets: StaticAssets,
-    assetUploadTokens: AssetUploadTokens,
-    plans: Plans,
-    appIndex: AppIndex,
-    keybaseProfiles: KeybaseProfiles,
-    setupSession: SetupSession,
-    desktopNotifications: DesktopNotifications,
-    standaloneDomains: StandaloneDomains,
-    scheduledJobs: ScheduledJobs,
-    incomingTransfers: IncomingTransfers,
-    outgoingTransfers: OutgoingTransfers,
-  };
-}
+      packages: Packages,
+      devPackages: DevPackages,
+      userActions: UserActions,
+      grains: Grains,
+      roleAssignments: RoleAssignments, // Deprecated, only used by the migration that eliminated it.
+      contacts: Contacts,
+      sessions: Sessions,
+      signupKeys: SignupKeys,
+      activityStats: ActivityStats,
+      deleteStats: DeleteStats,
+      fileTokens: FileTokens,
+      spkTokens: SpkTokens,
+      apiTokens: ApiTokens,
+      apiHosts: ApiHosts,
+      notifications: Notifications,
+      activitySubscriptions: ActivitySubscriptions,
+      statsTokens: StatsTokens,
+      misc: Misc,
+      settings: Settings,
+      migrations: Migrations,
+      staticAssets: StaticAssets,
+      assetUploadTokens: AssetUploadTokens,
+      plans: Plans,
+      appIndex: AppIndex,
+      keybaseProfiles: KeybaseProfiles,
+      setupSession: SetupSession,
+      desktopNotifications: DesktopNotifications,
+      standaloneDomains: StandaloneDomains,
+      scheduledJobs: ScheduledJobs,
+      incomingTransfers: IncomingTransfers,
+      outgoingTransfers: OutgoingTransfers,
+    };
+  }
 
-// TODO(cleanup): These methods should not be defined freestanding and should use collection
-//   objects created in SandstormDb's constructor rather than globals.
+  isAdmin() {
+    // Returns true if the user is the administrator.
 
-_.extend(SandstormDb.prototype, {
-  isAdmin: isAdmin,
-  isAdminById: isAdminById,
-  findAdminUserForToken: findAdminUserForToken,
-  matchWildcardHost: matchWildcardHost,
-  makeWildcardHost: makeWildcardHost,
-  isApiHostId: isApiHostId,
-  isTokenSpecificHostId: isTokenSpecificHostId,
-  apiHostIdHashForToken: apiHostIdHashForToken,
-  apiHostIdForToken: apiHostIdForToken,
-  makeApiHost: makeApiHost,
+    const user = Meteor.user();
+    if (user && user.isAdmin) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  isAdminById(id) {
+    // Returns true if the user's id is the administrator.
+
+    const user = Meteor.users.findOne({ _id: id }, { fields: { isAdmin: 1 } });
+    if (user && user.isAdmin) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
   allowDevAccounts() {
     const setting = this.collections.settings.findOne({ _id: "devAccounts" });
     if (setting) {
@@ -1174,15 +1163,7 @@ _.extend(SandstormDb.prototype, {
       return Meteor.settings && Meteor.settings.public &&
              Meteor.settings.public.allowDevAccounts;
     }
-  },
-
-  roleAssignmentPattern: {
-    none: Match.Optional(null),
-    allAccess: Match.Optional(null),
-    roleId: Match.Optional(Match.Integer),
-    addPermissions: Match.Optional([Boolean]),
-    removePermissions: Match.Optional([Boolean]),
-  },
+  }
 
   isDemoUser() {
     // Returns true if this is a demo user.
@@ -1193,12 +1174,12 @@ _.extend(SandstormDb.prototype, {
     } else {
       return false;
     }
-  },
+  }
 
   isSignedUp() {
     const user = Meteor.user();
     return this.isAccountSignedUp(user);
-  },
+  }
 
   isAccountSignedUp(user) {
     // Returns true if the user has presented an invite key.
@@ -1216,12 +1197,12 @@ _.extend(SandstormDb.prototype, {
     if (this.isUserInOrganization(user)) return true;
 
     return false;
-  },
+  }
 
   isSignedUpOrDemo() {
     const user = Meteor.user();
     return this.isAccountSignedUpOrDemo(user);
-  },
+  }
 
   isAccountSignedUpOrDemo(user) {
     if (!user) return false;  // not signed in
@@ -1237,7 +1218,7 @@ _.extend(SandstormDb.prototype, {
     if (this.isUserInOrganization(user)) return true;
 
     return false;
-  },
+  }
 
   isCredentialInOrganization(credential) {
     if (!credential || !credential.services) {
@@ -1250,6 +1231,7 @@ _.extend(SandstormDb.prototype, {
     const emailEnabled = orgMembership && orgMembership.emailToken && orgMembership.emailToken.enabled;
     const emailDomain = orgMembership && orgMembership.emailToken && orgMembership.emailToken.domain;
     const ldapEnabled = orgMembership && orgMembership.ldap && orgMembership.ldap.enabled;
+    const oidcEnabled = orgMembership && orgMembership.oidc && orgMembership.oidc.enabled;
     const samlEnabled = orgMembership && orgMembership.saml && orgMembership.saml.enabled;
     if (emailEnabled && emailDomain && credential.services.email) {
       const domainSuffixes = emailDomain.split(/\s*,\s*/);
@@ -1266,6 +1248,8 @@ _.extend(SandstormDb.prototype, {
       }
     } else if (ldapEnabled && credential.services.ldap) {
       return true;
+    } else if (oidcEnabled && credential.services.oidc) {
+      return true;
     } else if (samlEnabled && credential.services.saml) {
       return true;
     } else if (googleEnabled && googleDomain && credential.services.google && credential.services.google.hd) {
@@ -1275,7 +1259,7 @@ _.extend(SandstormDb.prototype, {
     }
 
     return false;
-  },
+  }
 
   isUserInOrganization(user) {
     for (let i = 0; i < user.loginCredentials.length; i++) {
@@ -1286,6 +1270,28 @@ _.extend(SandstormDb.prototype, {
     }
 
     return false;
+  }
+}
+
+// TODO(cleanup): These methods should not be defined freestanding and should use collection
+//   objects created in SandstormDb's constructor rather than globals.
+
+_.extend(SandstormDb.prototype, {
+  findAdminUserForToken: findAdminUserForToken,
+  matchWildcardHost: matchWildcardHost,
+  makeWildcardHost: makeWildcardHost,
+  isApiHostId: isApiHostId,
+  isTokenSpecificHostId: isTokenSpecificHostId,
+  apiHostIdHashForToken: apiHostIdHashForToken,
+  apiHostIdForToken: apiHostIdForToken,
+  makeApiHost: makeApiHost,
+
+  roleAssignmentPattern: {
+    none: Match.Optional(null),
+    allAccess: Match.Optional(null),
+    roleId: Match.Optional(Match.Integer),
+    addPermissions: Match.Optional([Boolean]),
+    removePermissions: Match.Optional([Boolean]),
   },
 });
 
@@ -1794,6 +1800,11 @@ _.extend(SandstormDb.prototype, {
   getOrganizationLdapEnabled() {
     const membership = this.getOrganizationMembership();
     return membership && membership.ldap && membership.ldap.enabled;
+  },
+
+  getOrganizationOidcEnabled() {
+    const membership = this.getOrganizationMembership();
+    return membership && membership.oidc && membership.oidc.enabled;
   },
 
   getOrganizationSamlEnabled() {
@@ -2309,6 +2320,22 @@ SandstormDb.escapeMongoKey = (key) => {
   return key.replace(".", "\uFF0E").replace("$", "\uFF04");
 };
 
+SandstormDb.escapeMongoObject = (obj) => {
+  if (obj && (typeof obj == "object")) {
+    if (obj instanceof Array) {
+      return obj.map(e => SandstormDb.escapeMongoObject(e));
+    } else {
+      let result = {};
+      for (let key in obj) {
+        result[SandstormDb.escapeMongoKey(key)] = SandstormDb.escapeMongoObject(obj[key]);
+      }
+      return result;
+    }
+  } else {
+    return obj;
+  }
+};
+
 function appNameFromPackage(packageObj) {
   // This function takes a Package object from Mongo and returns an
   // app title.
@@ -2394,6 +2421,8 @@ _.extend(SandstormDb, {
 });
 
 if (Meteor.isServer) {
+  import { waitPromise } from "/imports/server/async-helpers.ts";
+
   const Crypto = Npm.require("crypto");
   const ContentType = Npm.require("content-type");
   const Zlib = Npm.require("zlib");
@@ -2617,18 +2646,6 @@ if (Meteor.isServer) {
 
   SandstormDb.prototype.cleanupExpiredAssetUploads = function () {
     this.collections.assetUploadTokens.remove({ expires: { $lt: Date.now() } });
-  };
-
-  // TODO(cleanup): lift this out of the package so it can share with the ones in async-helpers.js
-  const Future = Npm.require("fibers/future");
-  const promiseToFuture = (promise) => {
-    const result = new Future();
-    promise.then(result.return.bind(result), result.throw.bind(result));
-    return result;
-  };
-
-  const waitPromise = (promise) => {
-    return promiseToFuture(promise).wait();
   };
 
   SandstormDb.prototype.deleteGrains = function (query, backend, type) {

@@ -180,12 +180,14 @@ Config readConfig(const char *path, bool parseUids) {
     auto key = trim(line.slice(0, equalsPos));
     auto value = trim(line.slice(equalsPos + 1));
 
-    if (key == "SERVER_USER" && parseUids) {
-      KJ_IF_MAYBE(u, getUserIds(value)) {
-        config.uids = kj::mv(*u);
-        KJ_REQUIRE(config.uids.uid != 0, "Sandstorm cannot run as root.");
-      } else {
-        KJ_FAIL_REQUIRE("invalid config value SERVER_USER", value);
+    if (key == "SERVER_USER") {
+      if(parseUids) {
+        KJ_IF_MAYBE(u, getUserIds(value)) {
+          config.uids = kj::mv(*u);
+          KJ_REQUIRE(config.uids.uid != 0, "Sandstorm cannot run as root.");
+        } else {
+          KJ_FAIL_REQUIRE("invalid config value SERVER_USER", value);
+        }
       }
     } else if (key == "HTTPS_PORT") {
       KJ_IF_MAYBE(p, parseUInt(value, 10)) {
@@ -262,6 +264,19 @@ Config readConfig(const char *path, bool parseUids) {
       config.stripeKey = kj::mv(value);
     } else if (key == "STRIPE_PUBLIC_KEY") {
       config.stripePublicKey = kj::mv(value);
+    } else if (key == "USE_EXPERIMENTAL_SECCOMP_FILTER") {
+      config.useExperimentalSeccompFilter = value == "true" || value == "yes";
+    } else if (key == "LOG_SECCOMP_VIOLATIONS") {
+      config.logSeccompViolations = value == "true" || value == "yes";
+    } else if (key == "ALLOW_LEGACY_RELAXED_CSP") {
+      KJ_LOG(WARNING,
+          "The option ALLOW_LEGACY_RELAXED_CSP will be removed "
+          "soon. Apps that rely on loading third party resources "
+          "should be modified to embed those resources in the app "
+          "package instead.");
+      config.allowLegacyRelaxedCSP = value == "true" || value == "yes";
+    } else {
+      KJ_LOG(WARNING, "Ignoring unrecognized config option", key);
     }
   }
 

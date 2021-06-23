@@ -156,12 +156,13 @@ const HeaderWhitelist REQUEST_HEADER_WHITELIST(*WebSession::Context::HEADER_WHIT
 const HeaderWhitelist RESPONSE_HEADER_WHITELIST(*WebSession::Response::HEADER_WHITELIST);
 #pragma clang diagnostic pop
 
-class HttpParser: public sandstorm::Handle::Server,
+class HttpParser final: public sandstorm::Handle::Server,
                   private http_parser,
                   private kj::TaskSet::ErrorHandler {
 public:
-  HttpParser(sandstorm::ByteStream::Client responseStream)
+  HttpParser(sandstorm::ByteStream::Client responseStream, bool ignoreBody = false)
     : responseStream(responseStream),
+      ignoreBody(ignoreBody),
       taskSet(*this) {
     memset(&settings, 0, sizeof(settings));
     settings.on_status = &on_status;
@@ -415,7 +416,7 @@ public:
     // TODO(soon):  If the app returned a normal response without upgrading, we should forward that
     //   through, as it's perfectly valid HTTP.  The WebSession interface currently does not
     //   support this.
-    KJ_ASSERT(status_code == 101, "Sandboxed app does not support WebSocket.",
+    KJ_ASSERT((int)status_code == 101, "Sandboxed app does not support WebSocket.",
               (int)upgrade, (int)status_code, statusString);
 
     KJ_IF_MAYBE(protocol, findHeader("sec-websocket-protocol")) {
@@ -486,6 +487,7 @@ private:
   };
 
   sandstorm::ByteStream::Client responseStream;
+  bool ignoreBody;
   kj::TaskSet taskSet;
   http_parser_settings settings;
   kj::Vector<RawHeader> rawHeaders;
@@ -503,7 +505,7 @@ private:
   bool aborted = false;
 
   kj::Maybe<kj::Own<kj::PromiseFulfiller<void>>> writeReady;
-  capnp::Request<ByteStream::WriteParams, ByteStream::WriteResults> nextWrite = nullptr;
+  capnp::StreamingRequest<ByteStream::WriteParams> nextWrite = nullptr;
   capnp::Orphan<capnp::Data> nextWriteData;
   size_t nextWriteSize = 0;  // how many bytes are already in `nextWriteData`
 
@@ -516,7 +518,7 @@ private:
       nextWriteData.truncate(nextWriteSize);
       nextWrite.adoptData(kj::mv(nextWriteData));
 
-      auto result = nextWrite.send().then([this](auto&&) {
+      auto result = nextWrite.send().then([this]() {
         return pumpWrites();
       });
 
@@ -754,7 +756,7 @@ private:
     }
   }
 
-  void onHeadersComplete() {
+  bool onHeadersComplete() {
     for (auto &rawHeader : rawHeaders) {
       addHeader(rawHeader);
     }
@@ -762,11 +764,21 @@ private:
     statusString = kj::heapString(rawStatusString);
 
     headersComplete = true;
-    KJ_ASSERT(status_code >= 100, (int)status_code);
+    KJ_ASSERT((int)status_code >= 100, (int)status_code);
+    return ignoreBody;
   }
 
   void onMessageComplete() {
     messageComplete = true;
+  }
+
+  static int on_headers_complete(http_parser *p) {
+    // For other http callbacks, we use the ON_EVENT macro defined below,
+    // but we can't for on_headers_complete because its return value has a special
+    // case: We return 1 to indicate that the parser should not expect a body,
+    // whereas for all other event callbacks, non-zero indicates an error.
+    bool ignoreBody = static_cast<HttpParser*>(p)->onHeadersComplete();
+    return (ignoreBody)? 1 : 0;
   }
 
 #define ON_DATA(lower, title) \
@@ -784,7 +796,6 @@ private:
   ON_DATA(header_field, HeaderField)
   ON_DATA(header_value, HeaderValue)
   ON_DATA(body, Body)
-  ON_EVENT(headers_complete, HeadersComplete)
   ON_EVENT(message_complete, MessageComplete)
 #undef ON_DATA
 #undef ON_EVENT
@@ -923,7 +934,7 @@ public:
     auto request = clientStream.sendBytesRequest(
         capnp::MessageSize { data.size() / sizeof(capnp::word) + 8, 0 });
     request.setMessage(data);
-    tasks.add(request.send().ignoreResult());
+    tasks.add(request.send());
   }
 
 protected:
@@ -1273,7 +1284,7 @@ private:
   kj::AutoCloseFd trashDir;
 
   struct SessionRecord {
-    SessionRecord(const SessionRecord& other) = delete;
+    SessionRecord(const SessionRecord& other) = default;
     SessionRecord(SessionRecord&& other) = default;
 
     SessionContext::Client& sessionCtx;
@@ -1435,7 +1446,7 @@ public:
     GetParams::Reader params = context.getParams();
     kj::String httpRequest = makeHeaders(
         params.getIgnoreBody() ? "HEAD" : "GET", params.getPath(), params.getContext());
-    return sendRequest(toBytes(httpRequest), context);
+    return sendRequest(toBytes(httpRequest), context, params.getIgnoreBody());
   }
 
   kj::Promise<void> post(PostContext context) override {
@@ -1622,7 +1633,7 @@ public:
     context.releaseParams();
 
     return serverAddr.connect().then(
-        [this, KJ_MVCAP(httpRequest), KJ_MVCAP(clientStream), responseStream, context]
+        [KJ_MVCAP(httpRequest), KJ_MVCAP(clientStream), responseStream, context]
         (kj::Own<kj::AsyncIoStream>&& stream) mutable {
       kj::ArrayPtr<const byte> httpRequestRef = httpRequest;
       auto& streamRef = *stream;
@@ -1869,22 +1880,22 @@ private:
   }
 
   template <typename Context>
-  kj::Promise<void> sendRequest(kj::Array<byte> httpRequest, Context& context) {
+  kj::Promise<void> sendRequest(kj::Array<byte> httpRequest, Context& context, bool ignoreBody = false) {
     sandstorm::ByteStream::Client responseStream =
         context.getParams().getContext().getResponseStream();
     context.releaseParams();
     return serverAddr.connect().then(
-        [KJ_MVCAP(httpRequest), responseStream, context]
+        [KJ_MVCAP(httpRequest), responseStream, context, ignoreBody]
         (kj::Own<kj::AsyncIoStream>&& stream) mutable {
       kj::ArrayPtr<const byte> httpRequestRef = httpRequest;
       auto& streamRef = *stream;
       return streamRef.write(httpRequestRef.begin(), httpRequestRef.size())
           .attach(kj::mv(httpRequest))
-          .then([KJ_MVCAP(stream), responseStream, context]() mutable {
+          .then([KJ_MVCAP(stream), responseStream, context, ignoreBody]() mutable {
         // Note:  Do not do stream->shutdownWrite() as some HTTP servers will decide to close the
         // socket immediately on EOF, even if they have not actually responded to previous requests
         // yet.
-        auto parser = kj::heap<HttpParser>(responseStream);
+        auto parser = kj::heap<HttpParser>(responseStream, ignoreBody);
         auto results = context.getResults();
 
         return parser->readResponse(*stream).then(
@@ -1941,7 +1952,7 @@ private:
     });
   }
 
-  class IgnoreStream: public ByteStream::Server {
+  class IgnoreStream final: public ByteStream::Server {
   protected:
     kj::Promise<void> write(WriteContext context) override { return kj::READY_NOW; }
     kj::Promise<void> done(DoneContext context) override { return kj::READY_NOW; }
@@ -2297,7 +2308,7 @@ private:
   kj::ArrayPtr<const char> suffix;
 };
 
-class SandstormHttpBridgeImpl: public SandstormHttpBridge::Server {
+class SandstormHttpBridgeImpl final: public SandstormHttpBridge::Server {
 public:
   explicit SandstormHttpBridgeImpl(SandstormApi<BridgeObjectId>::Client&& apiCap,
                                    BridgeContext& bridgeContext)
@@ -2676,7 +2687,7 @@ private:
       struct in_addr ipv4;
       ipv4.s_addr = ntohl(uint32_t(lower64));
       const char* ok = inet_ntop(AF_INET, &ipv4, buf, INET_ADDRSTRLEN);
-      KJ_REQUIRE(ok != NULL, "inet_ntop() failed");
+      KJ_REQUIRE(ok != nullptr, "inet_ntop() failed");
       kj::String s = kj::heapString(buf);
       return kj::mv(s);
     } else {
@@ -2701,7 +2712,7 @@ private:
       ipv6.s6_addr[14] = ((lower64 >>  8) & 0xff);
       ipv6.s6_addr[15] = ((lower64      ) & 0xff);
       const char* ok = inet_ntop(AF_INET6, &ipv6, buf, INET6_ADDRSTRLEN);
-      KJ_REQUIRE(ok != NULL, "inet_ntop() failed");
+      KJ_REQUIRE(ok != nullptr, "inet_ntop() failed");
       kj::String s = kj::heapString(buf);
       return kj::mv(s);
     }
@@ -2734,7 +2745,7 @@ public:
   SandstormHttpBridgeMain(kj::ProcessContext& context)
       : context(context),
         ioContext(kj::setupAsyncIo()),
-        appMembranePolicy(SaveMembranePolicy()),
+        appMembranePolicy(kj::refcounted<SaveMembranePolicy>()),
         appHooksFulfiller(nullptr) {
     kj::UnixEventPort::captureSignal(SIGCHLD);
   }
@@ -2783,7 +2794,7 @@ public:
     return serverPort.accept().then(
         [&, KJ_MVCAP(bridge)](kj::Own<kj::AsyncIoStream>&& connection) mutable {
       auto connectionState = kj::heap<AcceptedConnection>(
-          capnp::reverseMembrane(bridge, appMembranePolicy.addRef()),
+          capnp::reverseMembrane(bridge, appMembranePolicy->addRef()),
           kj::mv(connection));
 
       KJ_IF_MAYBE(fulfiller, appHooksFulfiller) {
@@ -2793,7 +2804,7 @@ public:
         (*fulfiller)->fulfill(
           capnp::membrane(
             connectionState->rpcSystem.bootstrap(vatId),
-            appMembranePolicy.addRef()
+            appMembranePolicy->addRef()
           ).castAs<AppHooks<>>()
         );
         fulfiller = nullptr;
@@ -2809,7 +2820,7 @@ public:
                                 kj::Timer& timer,
                                 bool loggedSlowStartupMessage,
                                 int numTriesSoFar) {
-    return address->connect().then([this, loggedSlowStartupMessage](auto x) -> void {
+    return address->connect().then([loggedSlowStartupMessage](auto x) -> void {
       if (loggedSlowStartupMessage) {
         KJ_LOG(WARNING, "App successfully started listening for TCP connections!");
       }
@@ -2982,7 +2993,7 @@ private:
   kj::AsyncIoContext ioContext;
   kj::Own<kj::NetworkAddress> address;
   kj::Vector<kj::String> command;
-  SaveMembranePolicy appMembranePolicy;
+  kj::Own<SaveMembranePolicy> appMembranePolicy;
   kj::Maybe<kj::Own<kj::PromiseFulfiller<AppHooks<>::Client>>> appHooksFulfiller;
 
   kj::Promise<int> onChildExit(pid_t pid) {

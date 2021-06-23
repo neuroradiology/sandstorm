@@ -19,9 +19,9 @@ import { check } from "meteor/check";
 import { Accounts } from "meteor/accounts-base";
 import { _ } from "meteor/underscore";
 
-import Identicon from "/imports/sandstorm-identicons/identicon.js";
+import Identicon from "/imports/sandstorm-identicons/identicon.ts";
 import { SandstormDb } from "./db.js";
-import { Settings } from "/imports/db-deprecated.js";
+import { globalDb } from "/imports/db-deprecated.js";
 
 let makeIdenticon;
 let httpProtocol;
@@ -94,6 +94,10 @@ if (Meteor.isServer) {
         "services.ldap.id": 1,
         "services.ldap.username": 1,
         "services.ldap.rawAttrs": 1,
+
+        "services.oidc.id": 1,
+        "services.oidc.email": 1,
+        "services.oidc.name": 1,
 
         "services.saml.id": 1,
         "services.saml.email": 1,
@@ -215,6 +219,10 @@ SandstormDb.fillInProfileDefaults = function (credential, profile) {
     profile.handle = profile.handle || emailToHandle(services.google.email) ||
         filterHandle(profile.name);
     profile.pronoun = profile.pronoun || GENDERS[services.google.gender] || "neutral";
+  } else if (services.oidc) {
+    profile.name = profile.name || services.oidc.name || "Name Unknown";
+    profile.handle = profile.handle || emailToHandle(services.oidc.email) ||
+        filterHandle(profile.name);
   } else if (services.email) {
     const email = services.email.email;
     profile.name = profile.name || emailToHandle(email);
@@ -230,7 +238,7 @@ SandstormDb.fillInProfileDefaults = function (credential, profile) {
     profile.name = profile.name || "Demo User";
     profile.handle = profile.handle || "demo";
   } else if (services.ldap) {
-    const setting = Settings.findOne({ _id: "ldapNameField" });
+    const setting = globalDb.collections.settings.findOne({ _id: "ldapNameField" });
     const key = setting ? setting.value : "";
     profile.handle = profile.handle || services.ldap.username;
     profile.name = profile.name || services.ldap.rawAttrs[key] || profile.handle;
@@ -254,6 +262,8 @@ SandstormDb.getIntrinsicName = function (credential, usePrivate) {
     return services.github.username;
   } else if (services.google) {
     return usePrivate ? services.google.email : services.google.name;
+  } else if (services.oidc) {
+    return services.oidc.id;
   } else if (services.email) {
     return services.email.email;
   } else if (services.dev) {
@@ -304,6 +314,8 @@ SandstormDb.getVerifiedEmailsForCredential = function (credential) {
   if (services.google && services.google.email &&
       services.google.verified_email) { // jscs:ignore requireCamelCaseOrUpperCaseIdentifiers
     return [{ email: services.google.email, primary: true }];
+  } else if (services.oidc) {
+    return [{ email: services.oidc.email, primary: true }];
   } else if (services.email) {
     return [{ email: services.email.email, primary: true }];
   } else if (services.github && services.github.emails) {
@@ -339,6 +351,7 @@ SandstormDb.prototype.findCredentialsByEmail = function (email) {
     { "services.email.email": email },
     { "services.github.emails.email": email },
     ldapQuery,
+    { "services.oidc.email": email },
     { "services.saml.email": email },
   ], }).fetch().filter(function (credential) {
     // Verify that the email is verified, since our query doesn't technically do that.

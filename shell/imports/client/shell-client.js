@@ -26,6 +26,7 @@ import { Accounts } from "meteor/accounts-base";
 import { Session } from "meteor/session";
 import { Router } from "meteor/iron:router";
 import { TAPi18n } from "meteor/tap:i18n";
+import { HTTP } from "meteor/http";
 
 import getBuildInfo from "/imports/client/build-info.js";
 import SandstormAccountSettingsUi from "/imports/client/accounts/account-settings-ui.js";
@@ -403,14 +404,14 @@ launchAndEnterGrainByActionId = function (actionId, devPackageId, devIndex, opti
   const title = "Untitled " + appTitle + " " + nounPhrase;
 
   // We need to ask the server to start a new grain, then browse to it.
-  Meteor.call("newGrain", packageId, command, title, null, function (error, grainId) {
+  Meteor.call("newGrain", packageId, command, title, function (error, grainId) {
     if (error) {
       if (error.error === 402 || error.error === "quota-exhausted") {
         // Sadly this can occur under LDAP quota management when the backend updates its quota
         // while creating the grain.
         showBillingPrompt("outOfStorage", function () {
           // TODO(someday): figure out the actual reason, instead of hard-coding outOfStorage
-          Meteor.call("newGrain", packageId, command, title, null,
+          Meteor.call("newGrain", packageId, command, title,
           function (error, grainId) {
             if (error) {
               console.error(error);
@@ -700,17 +701,6 @@ Template.registerHelper("referralsEnabled", function () {
 
 Template.registerHelper("con", function () {
   return Array.prototype.slice.call(arguments, 0, -1).join('.')
-});
-
-Template.registerHelper("freePlanGoingAway", function () {
-  return Meteor.settings.public.stripePublicKey &&
-      (Meteor.user().plan || "free") === "free" &&
-      globalDb.getMyPlan().grains > 0 &&
-      !globalDb.isDemoUser();
-});
-
-Template.registerHelper("oasisShuttingDown", function () {
-  return globalDb.getServerTitle() == "Sandstorm Oasis";
 });
 
 Template.root.helpers({

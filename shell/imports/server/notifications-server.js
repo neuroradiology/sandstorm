@@ -19,14 +19,10 @@ import { Match, check } from "meteor/check";
 import { _ } from "meteor/underscore";
 import { Random } from "meteor/random";
 
-import { waitPromise } from "/imports/server/async-helpers.js";
+import { waitPromise } from "/imports/server/async-helpers.ts";
 import { createAppActivityDesktopNotification } from "/imports/server/desktop-notifications.js";
-import Capnp from "/imports/server/capnp.js";
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
 import { globalDb } from "/imports/db-deprecated.js";
-
-const SupervisorCapnp = Capnp.importSystem("sandstorm/supervisor.capnp");
-const SystemPersistent = SupervisorCapnp.SystemPersistent;
 
 logActivity = function (grainId, accountIdOrAnonymous, event) {
   // accountIdOrAnonymous is the string "anonymous" for an anonymous user, or is null for a
@@ -121,7 +117,7 @@ logActivity = function (grainId, accountIdOrAnonymous, event) {
         }));
       }
     });
-    waitPromise(Promise.all(promises).then(junk => undefined));
+    waitPromise(Promise.all(promises));
   }
 
   // Make a list of everyone to notify.

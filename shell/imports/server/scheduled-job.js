@@ -16,11 +16,12 @@
 
 import { Meteor } from "meteor/meteor";
 
-import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
-import { PersistentImpl, fetchApiToken } from "/imports/server/persistent.js";
+import { waitPromise } from "/imports/server/async-helpers.ts";
+import { fetchApiToken } from "/imports/server/persistent.js";
 import Capnp from "/imports/server/capnp.js";
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
 import { globalDb } from "/imports/db-deprecated.js";
+import { filterCallbacks, subscriptionCallbacks } from "/imports/collection-utils.ts";
 
 const ScheduledJob = Capnp.importSystem("sandstorm/grain.capnp").ScheduledJob;
 const SystemPersistent = Capnp.importSystem("sandstorm/supervisor.capnp").SystemPersistent;
@@ -28,7 +29,7 @@ const SystemPersistent = Capnp.importSystem("sandstorm/supervisor.capnp").System
 const MINIMUM_SCHEDULING_SLACK_NANO = Capnp.importSystem("sandstorm/grain.capnp").minimumSchedulingSlack;
 const MINIMUM_SCHEDULING_SLACK_MILLIS = MINIMUM_SCHEDULING_SLACK_NANO / 1e6;
 
-scheduleOneShot = (db, grainId, name, callback, when, slack) => {
+export const scheduleOneShot = (db, grainId, name, callback, when, slack) => {
   callback.castAs(SystemPersistent).save({ frontend: null }).then((result) => {
     db.addOneShotScheduledJob(
       grainId,
@@ -40,7 +41,7 @@ scheduleOneShot = (db, grainId, name, callback, when, slack) => {
   })
 }
 
-schedulePeriodic = (db, grainId, name, callback, period) => {
+export const schedulePeriodic = (db, grainId, name, callback, period) => {
   callback.castAs(SystemPersistent).save({ frontend: null }).then((result) => {
     db.addPeriodicScheduledJob(
       grainId,
@@ -64,7 +65,7 @@ export const runDueJobs = (nowMillis) => {
   jobs.forEach((job) => {
     if (job.lastKeepAlive) {
       if (job.retries && job.retries >= MAX_DISCONNECTED_RETRIES) {
-        db.recordScheduleJobRan(job, {
+        db.recordScheduledJobRan(job, {
           finished: job.lastKeepAlive,
           type: "disconnected",
           message: "MAX_DISCONNECTED_RETRIES exceeded",
@@ -87,7 +88,7 @@ export const runDueJobs = (nowMillis) => {
 
       intervalHandle = Meteor.setInterval(() => {
         globalBackend.useGrain(job.grainId, (supervisor) => {
-          waitPromise(supervisor.keepAlive());
+          return supervisor.keepAlive();
         });
         db.updateScheduledJobKeepAlive(job._id);
       }, KEEP_ALIVE_INTERVAL_MILLIS);
@@ -125,3 +126,25 @@ export const runDueJobs = (nowMillis) => {
 }
 
 SandstormDb.periodicCleanup(MINIMUM_SCHEDULING_SLACK_MILLIS, () => runDueJobs(Date.now()));
+
+Meteor.publish("scheduledJobs", function() {
+  // Returns info about all jobs for grains owned by the current user.
+  if(!this.userId) {
+    return [];
+  }
+  const db = globalDb;
+
+  db.collections.scheduledJobs.find({}, {
+      _id: 1,
+      grainId: 1,
+      name: 1,
+      created: 1,
+      period: 1,
+      nextPeriodStart: 1,
+      previousError: 1,
+  }).observe(filterCallbacks(subscriptionCallbacks("scheduledJobs", this), ({grainId}) => {
+    const owner = db.collections.grains.findOne({_id: grainId}, {userId: 1}).userId;
+    return db.isAdmin() || owner === this.userId();
+  }));
+  this.ready();
+});

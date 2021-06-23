@@ -36,7 +36,7 @@
 import { Meteor } from "meteor/meteor";
 import { BrowserPolicy } from "meteor/browser-policy";
 
-import { inMeteor } from "/imports/server/async-helpers.js";
+import { inMeteor } from "/imports/server/async-helpers.ts";
 import { globalDb } from "/imports/db-deprecated.js";
 
 BrowserPolicy.framing.disallow();  // Disallow framing of the UI.
@@ -115,7 +115,7 @@ Meteor.publish("hasUsers", function () {
     this.added("hasUsers", "hasUsers", { hasUsers: true });
   } else {
     let handle = cursor.observeChanges({
-      added: (id) => {
+      added: (_id) => {
         this.added("hasUsers", "hasUsers", { hasUsers: true });
         handle.stop();
         handle = null;
@@ -263,7 +263,7 @@ Meteor.publish("referralInfoPseudo", function () {
         // If the handle doesn't show up in the new list of referredAccountIds, then remove
         // info from the client & stop it on the server & make it null.
         const handleForProfileName = handleForProfileNameByAccountId[accountId];
-        if (referredAccountIdsAsObject.hasOwnProperty(accountId)) {
+        if (Object.prototype.hasOwnProperty.call(referredAccountIdsAsObject, accountId)) {
           stopWatchingAccount(accountId);
         }
       });

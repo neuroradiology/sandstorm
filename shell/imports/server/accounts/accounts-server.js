@@ -24,7 +24,6 @@ import { SandstormDb } from "/imports/sandstorm-db/db.js";
 import { globalDb } from "/imports/db-deprecated.js";
 
 import Crypto from "crypto";
-import Future from "fibers/future";
 
 const ValidHandle = Match.Where(function (handle) {
   check(handle, String);
@@ -135,6 +134,8 @@ Accounts.onCreateUser(function (options, user) {
     serviceUserId = user.services.github.id;
   } else if (user.services && "ldap" in user.services) {
     serviceUserId = user.services.ldap.id;
+  } else if (user.services && "oidc" in user.services) {
+    serviceUserId = user.services.oidc.id;
   } else if (user.services && "saml" in user.services) {
     serviceUserId = user.services.saml.id;
   } else {

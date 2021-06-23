@@ -5,6 +5,7 @@ import { Tracker } from "meteor/tracker";
 import { ReactiveVar } from "meteor/reactive-var";
 import { _ } from "meteor/underscore";
 import { Router } from "meteor/iron:router";
+import { Iron } from "meteor/iron:core";
 
 import SandstormAccountSettingsUi from "/imports/client/accounts/account-settings-ui.js";
 import AccountsUi from "/imports/client/accounts/accounts-ui.js";
@@ -57,6 +58,7 @@ const setupIsStepCompleted = {
       providerEnabled("google") ||
       providerEnabled("github") ||
       providerEnabled("ldap") ||
+      providerEnabled("oidc") ||
       providerEnabled("saml")
     );
   },
@@ -322,6 +324,7 @@ Template.setupWizardLogin.events({
 
 Template.setupWizardOrganization.onCreated(function () {
   const ldapChecked = globalDb.getOrganizationLdapEnabled() || false;
+  const oidcChecked = globalDb.getOrganizationOidcEnabled() || false;
   const samlChecked = globalDb.getOrganizationSamlEnabled() || false;
   const gappsChecked = globalDb.getOrganizationGoogleEnabled() || false;
   const emailChecked = globalDb.getOrganizationEmailEnabled() || false;
@@ -333,6 +336,7 @@ Template.setupWizardOrganization.onCreated(function () {
   const shareContacts = globalDb.getOrganizationShareContactsRaw() || false;
 
   this.ldapChecked = new ReactiveVar(ldapChecked);
+  this.oidcChecked = new ReactiveVar(oidcChecked);
   this.samlChecked = new ReactiveVar(samlChecked);
   this.gappsChecked = new ReactiveVar(gappsChecked);
   this.emailChecked = new ReactiveVar(emailChecked);
@@ -486,6 +490,9 @@ Template.setupWizardOrganization.events({
         google: {
           enabled: instance.gappsChecked.get(),
           domain: instance.gappsDomain.get().trim(),
+        },
+        oidc: {
+          enabled: instance.oidcChecked.get(),
         },
         ldap: {
           enabled: instance.ldapChecked.get(),
@@ -890,6 +897,7 @@ Template.setupWizardSuccess.helpers({
   someOrgMembershipEnabled() {
     return (
       globalDb.getOrganizationLdapEnabled() ||
+      globalDb.getOrganizationOidcEnabled() ||
       globalDb.getOrganizationSamlEnabled() ||
       globalDb.getOrganizationGoogleEnabled() ||
       globalDb.getOrganizationEmailEnabled()

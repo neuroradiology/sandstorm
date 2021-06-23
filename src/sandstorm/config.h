@@ -32,6 +32,11 @@ struct Config {
   kj::Maybe<kj::String> termsPublicId = nullptr;
   kj::Maybe<kj::String> stripeKey = nullptr;
   kj::Maybe<kj::String> stripePublicKey = nullptr;
+
+  bool allowLegacyRelaxedCSP = true;
+
+  bool useExperimentalSeccompFilter = false;
+  bool logSeccompViolations = false;
 };
 
 // Read and return the config file from `path`.

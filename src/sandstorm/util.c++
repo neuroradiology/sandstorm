@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <kj/vector.h>
 #include <kj/async-unix.h>
+#include <kj/filesystem.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -95,6 +96,50 @@ kj::Maybe<kj::AutoCloseFd> raiiOpenAtIfExists(
   }
 }
 
+kj::Maybe<kj::AutoCloseFd> raiiOpenAtIfExistsContained(int dirfd, kj::StringPtr path, int flags, mode_t mode) {
+  return raiiOpenAtIfExistsContained(dirfd, kj::Path::parse(path), flags, mode);
+}
+
+kj::Maybe<kj::AutoCloseFd> raiiOpenAtIfExistsContained(int dirfd, kj::PathPtr path, int flags, mode_t mode) {
+  return raiiOpenAtIfExistsContained(dirfd, kj::Path{}.append(path), flags, mode);
+}
+
+kj::Maybe<kj::AutoCloseFd> raiiOpenAtIfExistsContained(int dirfd, kj::Path&& path, int flags, mode_t mode) {
+  int fd;
+  KJ_SYSCALL(fd = dup(dirfd));
+  kj::AutoCloseFd file(fd);
+  int symlink_limit = 16; // arbitrary limit
+
+  int i = 0;
+  while(i < path.size()) {
+    const char *part = path[i].cStr();
+    KJ_SYSCALL_HANDLE_ERRORS(fd = openat(file.get(), part, flags | O_NOFOLLOW, mode)) {
+      case ENOENT:
+        return nullptr;
+      case ELOOP:
+        {
+          if(symlink_limit == 0) {
+            KJ_FAIL_SYSCALL("openat()", error);
+          }
+          symlink_limit--;
+
+          auto target = kj::newDiskReadableDirectory(kj::mv(file))->readlink(kj::Path(part));
+          kj::Path nextPath = path.slice(0, i).eval(target);
+          path = kj::mv(nextPath).append(path.slice(i+1, path.size()));
+          i = 0;
+          KJ_SYSCALL(fd = dup(dirfd));
+          break;
+        }
+      default:
+        KJ_FAIL_SYSCALL("openat()", error);
+    } else {
+      i++;
+    }
+    file = kj::AutoCloseFd(fd);
+  }
+  return kj::mv(file);
+}
+
 size_t getFileSize(int fd, kj::StringPtr filename) {
   struct stat stats;
   KJ_SYSCALL(fstat(fd, &stats));
@@ -160,8 +205,7 @@ kj::Promise<void> pump(kj::AsyncInputStream& input, ByteStream::Client stream) {
     orphan.truncate(n);
     req.adoptData(kj::mv(orphan));
 
-    // TODO(perf): Parallelize writes.
-    return req.send().then([&input,KJ_MVCAP(stream)](auto&&) mutable {
+    return req.send().then([&input,KJ_MVCAP(stream)]() mutable {
       return pump(input, kj::mv(stream));
     });
   });
@@ -182,8 +226,7 @@ kj::Promise<void> pump(kj::InputStream& input, ByteStream::Client stream) {
   orphan.truncate(n);
   req.adoptData(kj::mv(orphan));
 
-  // TODO(perf): Parallelize writes.
-  return req.send().then([&input,KJ_MVCAP(stream)](auto&&) mutable {
+  return req.send().then([&input,KJ_MVCAP(stream)]() mutable {
     return pump(input, kj::mv(stream));
   });
 }

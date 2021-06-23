@@ -60,6 +60,8 @@ import "../imports/blackrock-payments/constants.js";
 import "../imports/blackrock-payments/server/payments-server.js";
 import "../imports/blackrock-payments/server/payments-api-server.js";
 
+// oidc
+import "../imports/oidc/oidc-server.js";
 
 // Import everything from server/ in the order that Meteor would have.
 import "../imports/server/accounts/credentials/credentials-server.js";
@@ -80,6 +82,7 @@ import "../imports/server/drivers/mail.js";
 import "../imports/db-deprecated.js";
 import "../imports/server/00-startup.js";
 import "../imports/server/account-suspension.js";
+import "../imports/server/acme.js";
 import "../imports/server/admin-server.js";
 import "../imports/server/backup.js";
 import "../imports/server/contacts-server.js";
@@ -107,4 +110,5 @@ import "../imports/server/transfers-server.js";
 import "../imports/shared/admin.js";
 import "../imports/shared/dev-accounts.js";
 import "../imports/shared/grain-shared.js";
-import "../imports/shared/testing.js";
+
+import "../imports/server/testing.js";

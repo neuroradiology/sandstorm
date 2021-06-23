@@ -20,6 +20,7 @@
 #include <kj/encoding.h>
 #include <sandstorm/mime.capnp.h>
 #include "util.h"
+#include "util/http.h"
 #include "smtp-proxy.h"
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -84,6 +85,7 @@ GatewayService::Tables::Tables(kj::HttpHeaderTable::Builder& headerTableBuilder)
       hDav(headerTableBuilder.add("Dav")),
       hLocation(headerTableBuilder.add("Location")),
       hOrigin(headerTableBuilder.add("Origin")),
+      hPermissionsPolicy(headerTableBuilder.add("Permissions-Policy")),
       hUserAgent(headerTableBuilder.add("User-Agent")),
       hWwwAuthenticate(headerTableBuilder.add("WWW-Authenticate")),
       hXRealIp(headerTableBuilder.add("X-Real-IP")),
@@ -94,10 +96,15 @@ GatewayService::Tables::Tables(kj::HttpHeaderTable::Builder& headerTableBuilder)
 GatewayService::GatewayService(
     kj::Timer& timer, kj::HttpClient& shellHttp, GatewayRouter::Client router,
     Tables& tables, kj::StringPtr baseUrl, kj::StringPtr wildcardHost,
-    kj::Maybe<kj::StringPtr> termsPublicId)
+    kj::Maybe<kj::StringPtr> termsPublicId, bool allowLegacyRelaxedCSP)
     : timer(timer), shellHttp(kj::newHttpService(shellHttp)), router(kj::mv(router)),
       tables(tables), baseUrl(kj::Url::parse(baseUrl, kj::Url::HTTP_PROXY_REQUEST)),
-      wildcardHost(wildcardHost), termsPublicId(termsPublicId), tasks(*this) {}
+      wildcardHost(wildcardHost), termsPublicId(termsPublicId), tasks(*this),
+      allowLegacyRelaxedCSP(allowLegacyRelaxedCSP),
+      defaultHeaders(kj::HttpHeaders(tables.headerTable)) {
+  // Tell chrome not to involve us in its spying on its users:
+  defaultHeaders.set(tables.hPermissionsPolicy, "interest-cohort=()");
+}
 
 template <typename Key, typename Value>
 static void removeExpired(std::map<Key, Value>& m, kj::TimePoint now, kj::Duration period) {
@@ -173,6 +180,15 @@ bool isAllowedBasicAuthUserAgent(kj::StringPtr ua) {
 }
 
 kj::Promise<void> GatewayService::request(
+    kj::HttpMethod method, kj::StringPtr url, const kj::HttpHeaders& headers,
+    kj::AsyncInputStream& requestBody, Response& origResponse) {
+
+  auto response = kj::heap<util::http::ExtraHeadersResponse>(origResponse, defaultHeaders);
+  auto promise = requestHelper(method, url, headers, requestBody, *response);
+  return promise.attach(kj::mv(response));
+}
+
+kj::Promise<void> GatewayService::requestHelper(
     kj::HttpMethod method, kj::StringPtr url, const kj::HttpHeaders& headers,
     kj::AsyncInputStream& requestBody, Response& response) {
   KJ_ASSERT(isPurging, "forgot to call cleanupLoop()");
@@ -442,8 +458,8 @@ kj::Maybe<kj::Own<kj::HttpService>> GatewayService::getUiBridge(kj::HttpHeaders&
     capnp::MallocMessageBuilder requestMessage(128);
     auto params = requestMessage.getRoot<WebSession::Params>();
 
-    auto basePath = kj::str(baseUrl.scheme, "://",
-        KJ_ASSERT_NONNULL(headers.get(kj::HttpHeaderId::HOST)));
+    kj::StringPtr host = KJ_ASSERT_NONNULL(headers.get(kj::HttpHeaderId::HOST));
+    auto basePath = kj::str(baseUrl.scheme, "://", host);
     params.setBasePath(basePath);
     params.setUserAgent(headers.get(tables.hUserAgent).orDefault("UnknownAgent/0.0"));
 
@@ -503,7 +519,9 @@ kj::Maybe<kj::Own<kj::HttpService>> GatewayService::getUiBridge(kj::HttpHeaders&
       timer.now(),
       kj::refcounted<WebSessionBridge>(timer, sessionRedirector.castAs<WebSession>(),
                                        Handle::Client(kj::mv(loadingPaf.promise)),
-                                       tables.bridgeTables, options)
+                                       tables.bridgeTables, options,
+                                       kj::str(host), kj::str(baseUrl.host),
+                                       allowLegacyRelaxedCSP)
     };
     auto insertResult = uiHosts.insert(std::make_pair(key, kj::mv(entry)));
     KJ_ASSERT(insertResult.second);
@@ -645,7 +663,7 @@ kj::Own<kj::HttpService> GatewayService::getApiBridge(
         // On error, invalidate the cached session immediately.
         apiHosts.erase(key);
       }));
-      return result;
+      return kj::mv(result);
     });
 
     ApiHostEntry entry {
@@ -874,27 +892,40 @@ kj::Promise<void> GatewayService::handleForeignHostname(kj::StringPtr host,
 
 kj::String GatewayService::unknownForeignHostnameError(kj::StringPtr host) {
   return kj::str(
-      "<style type=\"text/css\">h2, h3, p { max-width: 600px; }</style>"
-      "<h2>Sandstorm static publishing needs further configuration (or wrong URL)</h2>\n"
-      "<p>If you were trying to configure static publishing for a blog or website, powered "
-      "by a Sandstorm app hosted at this server, you either have not added DNS TXT records "
-      "correctly, or the DNS cache has not updated yet (may take a while, like 5 minutes to one "
-      "hour).</p>\n"
+      "<style type=\"text/css\">h1, h2, h3, p { max-width: 600px; }</style>"
+
+      "<h1>Sandstorm doesn't recognize this host name</h1>"
+
+      "<h2>If you we're trying to visit Sandstorm's main interface</h2>"
+
       "<p>To visit this Sandstorm server's main interface, go to: <a href='", baseUrl, "'>",
       baseUrl, "</a></p>\n"
-      "<h3>DNS details</h3>\n"
-      "<p>No TXT records were found for the host: <code>sandstorm-www.", host, "</code></p>\n"
-      "<p>If you have the <tt>dig</tt> tool, you can run this command to learn more:</p>\n"
-      "<p><code>dig -t TXT sandstorm-www.", host, "</code></p>\n"
-      "<h3>Changing the server URL, or troubleshooting OAuth login</h3>\n"
+
       "<p>If you are the server admin and want to use this address as the main interface, "
       "edit /opt/sandstorm/sandstorm.conf, modify the BASE_URL setting, and restart "
       "Sandstorm.</p>\n"
+
+      "<h2>If you got here after trying to log in via OAuth (e.g. through GitHub or Google)</h2>"
+
       "<p>If you got here after trying to log in via OAuth (e.g. through GitHub or Google), "
       "the problem is probably that the OAuth callback URL was set wrong. You need to "
       "update it through the respective login provider's management console. The "
       "easiest way to do that is to run <code>sudo sandstorm admin-token</code>, then "
-      "reconfigure the OAuth provider.</p>\n");
+      "reconfigure the OAuth provider.</p>\n"
+
+      "<h2>If you were trying to configure static publishing</h2>"
+
+      "<p>If you were trying to configure static publishing for a blog or website, powered "
+      "by a Sandstorm app hosted at this server, you either have not added DNS TXT records "
+      "correctly, or the DNS cache has not updated yet (may take a while, like 5 minutes to one "
+      "hour).</p>\n"
+
+      "<h3>DNS details</h3>\n"
+
+      "<p>No TXT records were found for the host: <code>sandstorm-www.", host, "</code></p>\n"
+      "<p>If you have the <tt>dig</tt> tool, you can run this command to learn more:</p>\n"
+      "<p><code>dig -t TXT sandstorm-www.", host, "</code></p>\n"
+      );
 }
 
 void GatewayService::taskFailed(kj::Exception&& exception) {
@@ -952,7 +983,7 @@ void GatewayTlsManager::unsetKeys() {
   readyFulfiller->fulfill();
 }
 
-class GatewayTlsManager::TlsKeyCallbackImpl: public GatewayRouter::TlsKeyCallback::Server {
+class GatewayTlsManager::TlsKeyCallbackImpl final: public GatewayRouter::TlsKeyCallback::Server {
 public:
   TlsKeyCallbackImpl(GatewayTlsManager& parent): parent(parent) {}
 
@@ -1021,11 +1052,10 @@ kj::Promise<void> GatewayTlsManager::listenSmtpsLoop(kj::ConnectionReceiver& por
   return port.accept().then([this, &port](kj::Own<kj::AsyncIoStream>&& stream) {
     KJ_IF_MAYBE(t, currentTls) {
       auto tls = kj::addRef(**t);
-      auto& tlsRef = tls->tls;
       tasks.add(tls->tls.wrapServer(kj::mv(stream))
-          .then([this,&tlsRef](kj::Own<kj::AsyncIoStream>&& encrypted) {
+          .then([this](kj::Own<kj::AsyncIoStream>&& encrypted) {
         return smtpServer.connect()
-            .then([this,&tlsRef,encrypted=kj::mv(encrypted)]
+            .then([encrypted=kj::mv(encrypted)]
                   (kj::Own<kj::AsyncIoStream>&& server) mutable {
           return pumpDuplex(kj::mv(encrypted), kj::mv(server));
         });

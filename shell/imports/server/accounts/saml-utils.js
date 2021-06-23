@@ -9,8 +9,6 @@ import zlib from "zlib";
 
 import { Meteor } from "meteor/meteor";
 
-const HOSTNAME = Url.parse(process.env.ROOT_URL).hostname;
-
 const SAML = function (options) {
   this.options = this.initialize(options);
 };
@@ -290,7 +288,7 @@ SAML.prototype.validateResponse = function (samlResponse, callback) {
       const conditions = _this.getElement(assertion[0], "Conditions")[0];
       if (conditions) {
         for (const key in conditions) {
-          if (conditions.hasOwnProperty(key)) {
+          if (Object.prototype.hasOwnProperty.call(conditions, key)) {
             const value = conditions[key];
             if (key === "$") {
               const nowMs = Date.now();

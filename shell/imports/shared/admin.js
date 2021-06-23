@@ -37,7 +37,7 @@ Accounts.loginServices.github = {
     return identity.services.github.username;
   },
 
-  initiateLogin: function (loginId) {
+  initiateLogin: function (_loginId) {
     Meteor.loginWithGithub();
     return { oneClick: true };
   },
@@ -89,7 +89,7 @@ Accounts.loginServices.email = {
     return identity.services.email.email;
   },
 
-  initiateLogin: function (loginId) {
+  initiateLogin: function (_loginId) {
     return { form: true };
   },
 
@@ -108,13 +108,39 @@ Accounts.loginServices.ldap = {
     return identity.services.ldap.username;
   },
 
-  initiateLogin: function (loginId) {
+  initiateLogin: function (_loginId) {
     return { form: true };
   },
 
   loginTemplate: {
     name: "ldapLoginForm",
     priority: 21, // Put it at the bottom of the list.
+  },
+};
+
+Accounts.loginServices.oidc = {
+  isEnabled: function () {
+    return serviceEnabled("oidc");
+  },
+
+  getLoginId: function (identity) {
+    return identity.services.oidc.id;
+  },
+
+  initiateLogin: function (_loginId) {
+    Meteor.loginWithOidc();
+    return { oneClick: true };
+  },
+
+  loginTemplate: {
+    name: "oauthLoginButton",
+    priority: 30,
+    data: {
+      method: "loginWithOidc",
+      name: "oidc",
+      displayName: "OpenID Connect",
+      linkingNewCredential: false,
+    },
   },
 };
 
@@ -127,7 +153,7 @@ Accounts.loginServices.saml = {
     return identity.services.saml.id;
   },
 
-  initiateLogin: function (loginId) {
+  initiateLogin: function (_loginId) {
     Meteor.loginWithSaml();
     return { oneClick: true };
   },
@@ -147,7 +173,7 @@ Accounts.loginServices.demo = {
     return identity._id;
   },
 
-  initiateLogin: function (loginId) {
+  initiateLogin: function (_loginId) {
     return { demoCannotLogin: true };
   },
 

@@ -16,16 +16,18 @@
 
 import { Meteor } from "meteor/meteor";
 import { Match, check } from "meteor/check";
+import { HTTP } from "meteor/http";
 import { _ } from "meteor/underscore";
 
-import { inMeteor } from "/imports/server/async-helpers.js";
+import { inMeteor } from "/imports/server/async-helpers.ts";
 import { PersistentImpl } from "/imports/server/persistent.js";
 import { ssrfSafeLookup } from "/imports/server/networking.js";
 import { REQUEST_HEADER_WHITELIST, RESPONSE_HEADER_WHITELIST }
     from "/imports/server/header-whitelist.js";
 import { globalDb } from "/imports/db-deprecated.js";
 
-import Future from "fibers/future";
+import { responseCodes } from "/imports/server/web-session.ts";
+
 import Url from "url";
 import Http from "http";
 import Https from "https";
@@ -33,34 +35,6 @@ import Capnp from "/imports/server/capnp.js";
 const ApiSession = Capnp.importSystem("sandstorm/api-session.capnp").ApiSession;
 const PersistentApiSession =
     Capnp.importSystem("sandstorm/api-session-impl.capnp").PersistentApiSession;
-
-ExternalUiView = class ExternalUiView {
-  constructor(url, token) {
-    this.url = url;
-    this.token = token;
-  }
-
-  newSession(userInfo, context, sessionType, sessionParams) {
-    if (sessionType !== ApiSession.typeId) {
-      throw new Error("SessionType must be ApiSession.");
-    }
-
-    const options = {};
-
-    if (this.token) {
-      options.headers = {
-        authorization: "Bearer " + this.token,
-      };
-    }
-
-    return inMeteor(() => {
-      return {
-        session: new Capnp.Capability(new ExternalWebSession(this.url, options, globalDb),
-                                      ApiSession),
-      };
-    });
-  }
-};
 
 function getOAuthServiceInfo(url) {
   // TODO(soon): Define a table somewhere (probably in a .capnp file) mapping API hosts to OAuth
@@ -262,46 +236,6 @@ Meteor.startup(() => { registerHttpApiFrontendRef(globalFrontendRefRegistry); })
 
 // =======================================================================================
 
-const responseCodes = {
-  200: { type: "content", code: "ok" },
-  201: { type: "content", code: "created" },
-  202: { type: "content", code: "accepted" },
-  204: { type: "noContent", shouldResetForm: false },
-  205: { type: "noContent", shouldResetForm: true },
-
-  // Unsupported until something demonstrates need.
-  // 206: {type: 'noContent'},
-  // 300: {type: 'redirect'},
-  301: { type: "redirect", switchToGet: true, isPermanent: true },
-  302: { type: "redirect", switchToGet: true, isPermanent: false },
-  303: { type: "redirect", switchToGet: true, isPermanent: false },
-
-  304: { type: "preconditionFailed" },
-
-  // Unsupported until something demonstrates need.
-  // 305: {type: 'redirect'},
-  307: { type: "redirect", switchToGet: false, isPermanent: false },
-  308: { type: "redirect", switchToGet: false, isPermanent: true },
-  400: { type: "clientError", clientErrorCode: "badRequest", descriptionHtml: "Bad Request" },
-  403: { type: "clientError", clientErrorCode: "forbidden", descriptionHtml: "Forbidden" },
-  404: { type: "clientError", clientErrorCode: "notFound", descriptionHtml: "Not Found" },
-  405: { type: "clientError", clientErrorCode: "methodNotAllowed", descriptionHtml: "Method Not Allowed" },
-  406: { type: "clientError", clientErrorCode: "notAcceptable", descriptionHtml: "Not Acceptable" },
-  409: { type: "clientError", clientErrorCode: "conflict", descriptionHtml: "Conflict" },
-  410: { type: "clientError", clientErrorCode: "gone", descriptionHtml: "Gone" },
-  412: { type: "preconditionFailed" },
-  413: { type: "clientError", clientErrorCode: "requestEntityTooLarge", descriptionHtml: "Request Entity Too Large" },
-  414: { type: "clientError", clientErrorCode: "requestUriTooLong", descriptionHtml: "Request-URI Too Long" },
-  415: { type: "clientError", clientErrorCode: "unsupportedMediaType", descriptionHtml: "Unsupported Media Type" },
-  418: { type: "clientError", clientErrorCode: "imATeapot", descriptionHtml: "I'm a teapot" },
-  500: { type: "serverError" },
-  501: { type: "serverError" },
-  502: { type: "serverError" },
-  503: { type: "serverError" },
-  504: { type: "serverError" },
-  505: { type: "serverError" },
-};
-
 function composeETag(etag) {
   if (etag.weak) {
     return "W/\"" + etag.value + "\"";
@@ -348,23 +282,14 @@ class ExternalWebSession extends PersistentImpl {
     options.headers.host = safe.host;
     options.servername = safe.host.split(":")[0];
 
-    if (!saveTemplate) {
-      // enable backwards-compatibilty tweaks.
-      this.fromHackSession = true;
-    }
-
     const parsedUrl = Url.parse(safe.url);
     this.host = parsedUrl.hostname;
-    if (this.fromHackSession) {
-      // HackSessionContext.getExternalUiView() apparently ignored any path on the URL. Whoops.
+    if (parsedUrl.path === "/") {
+      // The URL parser says path = "/" for both "http://foo" and "http://foo/". We want to be
+      // strict, though.
+      this.path = url.endsWith("/") ? "/" : "";
     } else {
-      if (parsedUrl.path === "/") {
-        // The URL parser says path = "/" for both "http://foo" and "http://foo/". We want to be
-        // strict, though.
-        this.path = url.endsWith("/") ? "/" : "";
-      } else {
-        this.path = parsedUrl.path;
-      }
+      this.path = parsedUrl.path;
     }
 
     this.port = parsedUrl.port;
@@ -408,19 +333,7 @@ class ExternalWebSession extends PersistentImpl {
       if (!options.headers["user-agent"]) {
         options.headers["user-agent"] = "sandstorm app";
       }
-
-      if (this.fromHackSession) {
-        // According to the specification of `WebSession`, `path` should not contain a
-        // leading slash, and therefore we need to prepend "/". However, for a long time
-        // this implementation did not in fact prepend a "/". Since some apps might rely on
-        // that behavior, we only prepend "/" if the path does not start with "/".
-        //
-        // TODO(soon): Once apps have updated, prepend "/" unconditionally.
-        options.path = path.startsWith("/") ? path : "/" + path;
-      } else {
-        options.path = this.path + "/" + path;
-      }
-
+      options.path = this.path + "/" + path;
       options.method = method;
       if (contentType) {
         options.headers["content-type"] = contentType;
@@ -429,7 +342,7 @@ class ExternalWebSession extends PersistentImpl {
       // set accept header
       if ("accept" in context) {
         options.headers.accept = context.accept.map((acceptedType) => {
-          return acceptedType.mimeType + "; " + acceptedType.qValue;
+          return acceptedType.mimeType + "; q=" + acceptedType.qValue;
         }).join(", ");
       } else if (!("accept" in options.headers)) {
         options.headers.accept = "*/*";

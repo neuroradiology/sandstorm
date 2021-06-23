@@ -40,9 +40,6 @@
       "title": "Not Found",
       "text": "404 Not Found :("
     },
-    "root": {
-      "title": "Home"
-    },
     "grainLogContents": {
       "prefix": "..."
     },
@@ -222,9 +219,22 @@
       "confirmHint": "download backup",
       "confirm": "Download backup"
     },
+    "grainCloneButton": {
+      "hint": "Clone Grain",
+      "text": "Clone",
+      "copyTitle": "Copy of %s"
+    },
+    "grainClonePopup": {
+      "title": "Clone Grain",
+      "processing": "Cloning Grain..."
+    },
     "grainRestartButton": {
       "hint": "Restart App",
       "text": "Restart"
+    },
+    "grainSettingsButton": {
+      "hint": "Grain Settings",
+      "text": "settings"
     },
     "grainApiTokenButton": {
       "hint": "Get webkey",
@@ -249,6 +259,26 @@
     "grainShareButton": {
       "hint": "Share access to this grain",
       "text": "Share access"
+    },
+    "settings": {
+      "title": "Grain Settings",
+      "returnToGrain": "Return to Grain",
+      "scheduledTasks": {
+        "title": "Scheduled Tasks",
+        "headings": {
+          "description": "Description",
+          "period": "Period",
+          "next": "Runs next at",
+          "created": "Created at"
+        },
+        "periodNames": {
+          "annually": "annually",
+          "monthly": "monthly",
+          "weekly": "weekly",
+          "daily": "daily",
+          "hourly": "hourly"
+        }
+      }
     },
     "whoHasAccessPopup": {
       "title": "Who has access",
@@ -659,6 +689,26 @@
         "cancelButton": "Cancel",
         "disableButton": "Disable"
       },
+      "oidcLoginSetupInstructions": {
+        "explanation": "First, you'll need to get a OpenID Connect Client ID and Client secret. Follow these steps:",
+        "step1": "Visit the configuration interface of your identity provider",
+        "step2": "Set Homepage URL to: <span class=\"idp-config-url\">%s</span>",
+        "step3": "Set Authorization callback URL to: <span class=\"idp-config-url\">%s_oauth/oidc</span>"
+      },
+      "adminIdentityProviderConfigureOidc": {
+        "title": "OpenID Connect login configuration",
+        "error": "Failed to save changes: %s",
+        "explanation": "Fill in your identity provider details:",
+        "serverUrl": "Identity Server URL:",
+        "clientId": "Client ID:",
+        "clientSecret": "Client secret:",
+        "advanced-explanation": "Some identity providers require configuration of advanced options:",
+        "clientAuthMethod": "Client Auth Method:",
+        "saveButton": "Save",
+        "enableButton": "Enable",
+        "cancelButton": "Cancel",
+        "disableButton": "Disable"
+      },
       "adminIdentityProviderConfigureSaml": {
         "title": "SAML login configuration",
         "explanation": "Your SAML IDP should be configured to return a persistent nameID. In addition, if you are not using Active Directory, you <strong>must</strong> configure your IDP to provide two extra attributes, <code>email</code> and <code>displayName</code>.",
@@ -733,6 +783,10 @@
           "ldapToggle": {
             "label": "Users authenticated via LDAP",
             "subtext": "Note: disabled because LDAP login is not configured."
+          },
+          "oidcToggle": {
+            "label": "Users authenticated via OpenID Connect",
+            "subtext": "Note: disabled because OpenID Connect login is not configured."
           },
           "samlToggle": {
             "label": "Users authenticated via SAML",
@@ -915,6 +969,12 @@
         },
         "saveButton": "Save",
         "restoreButton": "Restore defaults"
+      }
+    },
+    "certificates": {
+      "name": "SSL/TLS Certificates",
+      "subtext": "Configure certificates manually or using Let's Encrypt.",
+      "newAdminCertificates": {
       }
     },
     "users": {
@@ -1494,7 +1554,7 @@
       "_loginButtonsLoggedOutDropdown": {
         "demo": {
           "title": "Create account",
-          "explanation": "Your demo data will be transferred to your new account."
+          "explanation": "WARNING: Your demo data will be deleted."
         },
         "title": "Sign in",
         "shared": {
@@ -1704,6 +1764,10 @@
           "label": "Users authenticated via LDAP",
           "subtext": "Note: disabled because LDAP login is not configured."
         },
+        "oidcToggle": {
+          "label": "Users authenticated via OpenID Connect",
+          "subtext": "Note: disabled because OpenID Connect login is not configured."
+        },
         "samlToggle": {
           "label": "Users authenticated via SAML",
           "subtext": "Note: disabled because SAML login is not configured."
@@ -1806,7 +1870,7 @@
       "grains": "Grains",
       "oasis": "Start collaborating with others by using Sandstorm on Oasis:",
       "createAccount": "Create free account »",
-      "demoHint": "Your demo data will be transferred.",
+      "demoHint": "WARNING: Your demo data will be deleted.",
       "selfHostHint": "This is a limited-time demo. If you want to use Sandstorm for real, install it on your own server (it's open source):",
       "signUp": "Demo time remaining:",
       "close": "Close"

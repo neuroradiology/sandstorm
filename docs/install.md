@@ -141,23 +141,24 @@ Please install the following:
 * `zlib1g-dev`
 * `golang-go`
 * `cmake`
+* `strace`
 * discount (markdown parser)
-* [Meteor](http://meteor.com)
+* [Meteor](http://meteor.com) version 1.8.2
 
 On Debian or Ubuntu, you should be able to get all these with:
 
     sudo apt-get install build-essential libcap-dev xz-utils zip \
         unzip strace curl discount git python zlib1g-dev \
-        golang-go cmake
-    curl https://install.meteor.com/ | sh
+        golang-go cmake strace
+    curl https://install.meteor.com/?release=1.8.2 | sh
 
 On Fedora 27 you should be able to get them with (as root):
 
     dnf install make libcap-devel libstdc++-devel libstdc++-static \
        glibc-headers glibc-static glibc-locale-source xz zip \
        unzip strace curl discount git python2 zlib-devel \
-       golang cmake
-    curl https://install.meteor.com/ | sh
+       golang cmake strace
+    curl https://install.meteor.com/?release=1.8.2 | sh
 
 If you have trouble getting the build to work on your distro, we recommend trying in a virtual
 machine running the latest stable Debian release. This is easy to set up using Vagrant, like:

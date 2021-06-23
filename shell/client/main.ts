@@ -51,7 +51,6 @@ import "../imports/sandstorm-ui-topbar/topbar.js";
 
 // sandstorm-ui-powerbox.  Depends on sandstorm-db and sandstorm-ui-topbar
 import "../imports/sandstorm-ui-powerbox/powerbox.html";
-import "../imports/sandstorm-ui-powerbox/powerbox-client.js";
 
 // blackrock-payments
 import "../imports/blackrock-payments/constants.js";
@@ -71,6 +70,7 @@ import "../imports/client/accounts/account-settings.html";
 import "../imports/client/accounts/login-buttons.html";
 import "../imports/client/admin/admin.html";
 import "../imports/client/admin/app-sources.html";
+import "../imports/client/admin/certificates.html";
 import "../imports/client/admin/email-config.html";
 import "../imports/client/admin/hosting-management.html";
 import "../imports/client/admin/login-providers.html";
@@ -91,6 +91,7 @@ import "../imports/client/apps/install.html";
 import "../imports/client/billing/billingPromptLocal.html";
 import "../imports/client/grain/contact-autocomplete.html";
 import "../imports/client/grain/grainlist.html";
+import "../imports/client/grain/settings.html";
 import "../imports/client/setup-wizard/wizard.html";
 import "../imports/client/widgets/widgets.html";
 import "../imports/client/changelog.html";
@@ -115,6 +116,7 @@ import "../imports/client/accounts/login-buttons-session.js";
 import "../imports/client/accounts/login-buttons.js";
 import "../imports/client/admin/admin-new-client.js";
 import "../imports/client/admin/app-sources-client.js";
+import "../imports/client/admin/certificates-client.js";
 import "../imports/client/admin/email-config-client.js";
 import "../imports/client/admin/hosting-management-client.js";
 import "../imports/client/admin/login-providers.js";
@@ -135,6 +137,7 @@ import "../imports/client/apps/install-client.js";
 import "../imports/client/billing/billingPromptLocal-client.js";
 import "../imports/client/grain/contact-autocomplete.js";
 import "../imports/client/grain/grainlist-client.js";
+import "../imports/client/grain/settings-client.ts";
 import "../imports/client/setup-wizard/wizard.js";
 import "../imports/client/vendor/ansi-up.js";
 import "../imports/client/widgets/widgets-client.js";
@@ -156,4 +159,5 @@ import "../imports/client/transfers-client.js";
 import "../imports/shared/admin.js";
 import "../imports/shared/dev-accounts.js";
 import "../imports/shared/grain-shared.js";
-import "../imports/shared/testing.js";
+
+import "../imports/client/testing.js";

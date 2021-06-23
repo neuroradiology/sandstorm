@@ -23,6 +23,7 @@
 #include <capnp/rpc-twoparty.h>
 #include <kj/one-of.h>
 #include <kj/vector.h>
+#include <sandstorm/cgroup2.h>
 
 namespace kj {
   class InputStream;
@@ -30,11 +31,15 @@ namespace kj {
 
 namespace sandstorm {
 
-class BackendImpl: public Backend::Server, private kj::TaskSet::ErrorHandler {
+class BackendImpl final: public Backend::Server, private kj::TaskSet::ErrorHandler {
 public:
-  BackendImpl(kj::LowLevelAsyncIoProvider& ioProvider, kj::Network& network,
+  BackendImpl(kj::LowLevelAsyncIoProvider& ioProvider,
+              kj::Network& network,
               SandstormCoreFactory::Client&& sandstormCoreFactory,
-              kj::Maybe<uid_t> sandboxUid);
+              kj::Maybe<Cgroup>&& cgroup,
+              kj::Maybe<uid_t> sandboxUid,
+              bool useExperimentalSeccompFilter,
+              bool logSeccompViolations);
 
 protected:
   kj::Promise<void> ping(PingContext context) override;
@@ -59,6 +64,9 @@ private:
   SandstormCoreFactory::Client coreFactory;
   kj::Maybe<uid_t> sandboxUid;   // if not using user namespaces
   kj::TaskSet tasks;
+  kj::Maybe<Cgroup> cgroup;
+  bool useExperimentalSeccompFilter;
+  bool logSeccompViolations;
 
   class RunningGrain {
   public:
@@ -86,7 +94,16 @@ private:
     kj::ForkedPromise<Supervisor::Client> promise;
   };
 
-  std::map<kj::StringPtr, StartingGrain> supervisors;
+  struct BackingUpGrain {
+    kj::ForkedPromise<void> promise;
+    // Promise will be fulfiled when the backup is complete.
+  };
+
+  std::map<kj::StringPtr, kj::OneOf<StartingGrain, BackingUpGrain>> supervisors;
+  // Map of possibly-running grains. StartingGrain means the grain is actually
+  // running, or in the process of booting. BackingUpGrain means the grain is
+  // *not* running, but there is an in-progress backup, and it should not be
+  // started until the backup is complete.
 
   class PackageUploadStreamImpl;
   class FileUploadStream;

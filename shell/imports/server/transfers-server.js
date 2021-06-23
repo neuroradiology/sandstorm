@@ -22,9 +22,12 @@ import NodeHttps from "https";
 import { Meteor } from "meteor/meteor";
 import { Match, check } from "meteor/check";
 import { Router } from "meteor/iron:router";
+import { HTTP } from "meteor/http";
 
-import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
+import { inMeteor, waitPromise } from "/imports/server/async-helpers.ts";
 import { globalDb } from "/imports/db-deprecated.js";
+import { createGrainBackup, createBackupToken, restoreGrainBackup, storeGrainBackup }
+  from "/imports/server/backup.js";
 
 function isValidServerUrl(str) {
   let url;
@@ -193,7 +196,7 @@ Meteor.methods({
     if (running) {
       startOneTransfer(db, this.userId);
     } else {
-      let i = db.collections.incomingTransfers.update(
+      db.collections.incomingTransfers.update(
           {userId: this.userId, downloading: true}, {$unset: {downloading: 1}}, {multi: true});
     }
   },
@@ -341,14 +344,14 @@ function startOneTransfer(db, userId) {
 
 function revokeTransferTokens(db, userId) {
   let revokeMap = {};
-  db.collections.incomingTransfers.find({userId: this.userId}).forEach(transfer => {
+  db.collections.incomingTransfers.find({userId}).forEach(transfer => {
     revokeMap[transfer.token] = transfer.source;
   });
 
   for (let token in revokeMap) {
     HTTP.del(revokeMap[token] + "/transfers/cancel", {
       headers: {"Authorization": "Bearer " + token}
-    }, (err, response) => {
+    }, (err, _response) => {
       if (err) {
         // Don't really care...
         console.error("Error revoking transfer token:", err);
@@ -428,8 +431,6 @@ class Downloader {
       if (this.source.startsWith("https:")) {
         requestMethod = NodeHttps.request;
       }
-
-      let startTime = Date.now();
 
       this.request = requestMethod(this.source + "/downloadBackup/" + this.remoteFileToken);
       this.request.end();

@@ -1,3 +1,99 @@
+### v0.284 (2021-06-12)
+- Added new "grain settings" UI. (Thanks @zenhack.)
+- Sandstorm now automatically sends headers to opt out of Google's FLoC. (Thanks @zenhack.)
+
+### v0.283 (2021-05-15) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.282 (2021-04-17)
+- A new, tighter seccomp filter can optionally be enabled. If all goes well, we will probably make it the default in the future. (Thanks @zenhack.)
+- Meteor updated to 2.2, a major release.
+
+### v0.281 (2021-03-20)
+- Extended seccomp filter to block some newer system calls. (Thanks @zenhack.)
+- Meteor updated to 2.1, a major release.
+
+### v0.280 (2021-02-21) [bugfixes]
+- Updated dependencies. (No other changes.)
+
+### v0.279 (2021-01-23)
+- Extended `startSharing` `postMessage` API to allow a path (within the grain) to be appended to the sharing URL, so that users of the URL land on that path. (Thanks @troyjfarrell.)
+- Improved error behavior when given an invalid API token. (Thanks @zenhack.)
+- Meteor updated to 2.0, a major release.
+
+### v0.278 (2020-12-26)
+- Fix broken setup wizard.
+
+### v0.277 (2020-12-19)
+- Added OpenID Connect login provider. (Thanks @rs22.)
+- Fixed an re-landed static publishing change from 0.275 that had been reverted in 0.276. (Thanks @zenhack.)
+- Sandstorm now serves source maps (for its main UI) to make client-side debugging easier. (Thanks @zenhack.)
+- Meteor updated to 1.12, a major release.
+
+### v0.276 (2020-11-23)
+- Reverted broken static publishing change.
+
+### v0.275 (2020-11-22)
+- When an app uses static publishing, symlinks placed in the publish directory are no longer allowed to point outside that directory. This could hypothetically have been a security issue if an app allowed a non-trusted user to instruct it to publish symlinks, but we're not aware of any current apps that do this. Only the app's own data was at risk, not the system. (Thanks @zenhack.)
+- Removed implementation of `httpGet()` method of `HackSessionContext`. This has been disabled for some time, with the ability to re-enable it through a hidden setting, but no one has asked us for the hidden setting, so we believe this feature is no longer in use. Apps must now use powerbox requests to get permission to make HTTP requests. (Thanks @zenhack.)
+- Updated Dutch translation. (Thanks @m-burg.)
+
+### v0.274 (2020-10-26)
+- Fixed regression that broke downloading backups for some Linux kernel versions. Unfortunately, these versions do not support cgroup freezing and so will not get atomic backups.
+
+### v0.273 (2020-10-24)
+- Extended Let's Encrypt automatic certificate renewal to support deSEC DNS. (Thanks @rs22.)
+- Grains will now be temporarily paused while creating backups, to ensure the backup is atomic. (Thanks @zenhack.)
+- Updated Simplified Chinese translation. (Thanks @misaka00251.)
+- Fixed bug in sandstorm-http-bridge when responding to HEAD requests. Apps will need to be re-packaged to get the update. (Thanks @zenhack.)
+- Fixed "Unhandled exception in Promise:  TypeError: Cannot read property 'catch' of undefined" when using scheduled tasks. (Thanks @zenhack.)
+
+### v0.272 (2020-09-26)
+- Regular dependency updates.
+- To make porting apps a little easier, the headers `X-CSRFToken` and `X-CSRF-Token` are now automatically passed through to the app. Thanks @zenhack.
+
+### v0.271 (2020-08-31)
+- We have reverted the change preventing apps from talking to third-party servers in client-side code. This caused more breakage than was expected. We will work to fix and/or grandfather the affected apps before trying to roll this out again.
+
+### v0.270 (2020-08-29)
+- Apps can no longer talk to third-party servers in client-side code, except for embedding images and video. This has long been a goal of Sandstorm, but we did not want to begin enforcing it until apps could explicitly request access to third-party servers via the Powerbox. We have tested all apps on the app market and found only minor breakage (e.g. wrong fonts), but it is possible that we missed bigger breakages or that some private apps are broken. Please contact [sandstorm-dev](https://groups.google.com/group/sandstorm-dev) to report any issues. Thanks @zenhack for pushing this change through.
+- Apps can no longer make server-side HTTP requests without requsting permission through the Powerbox. We believe the only app that ever did so was Tiny Tiny RSS, but it was recently updated to use the powerbox. If you experience other app breakages, please let [sandstorm-dev](https://groups.google.com/group/sandstorm-dev) know. Thanks again to @zenhack.
+- Updated Finnish translation. Thanks @xet7.
+- Updated dependencies, including Meteor to 1.11.
+
+### v0.269 (2020-08-01)
+- You can now clone a grain via a button in the top bar. Thanks @zenhack.
+- Grains now run inside cgroups, if the kernel supports cgroup namespaces and cgroups v2. Thanks @zenhack.
+- Code implementing old Sandcats TLS issuance has been deleted. Sandcats now supports only Let's Encrypt.
+
+### v0.268 (2020-07-04)
+- Added CLI commands for configuring ACME (Let's Encrypt), so that this can be done before HTTPS is working.
+- New installs using Sandcats will now use Let's Encrypt immediately.
+- Improved error page when accessing Sandstorm using an unrecognized hostname. Thanks @zenhack.
+- Added Google Cloud Platform DNS provider for ACME challenges (not to be confused with Google Domains). Thanks @abliss.
+- Updated Sandstorm RPC APIs to use Cap'n Proto streaming flow control where applicable.
+- The box showing the changelog is now taller. Thanks @ocdtrekkie.
+- Made navigation menu scrollable on mobile. Thanks @spollard.
+
+### v0.267 (2020-06-06)
+- Fix possible problem where Let's Encrypt auto-migration would not actually renew the certificate until Sandstorm was restarted.
+
+### v0.266 (2020-06-06)
+- Sandcats domains using SSL will automatically migrate to Let's Encrypt over the next two weeks.
+- Dependency updates, refactorings, and minor bugfixes.
+
+### v0.265 (2020-05-09)
+- Fixed regression preventing first-time LDAP logins.
+- Dependency updates, refactorings, and minor bugfixes.
+
+### v0.264 (2020-05-05)
+- Fixed breakage in login providers admin panel and setup wizard caused by recent refactoring.
+
+### v0.263 (2020-05-02)
+- Added support for built-in TLS (aka SSL) certificate management through Let's Encrypt! This works with any domain, as long as you use one of the supported DNS providers (Sandcats.io, Cloudflare, Digital Ocean, DNSimple, Duck DNS, GoDaddy, Gandi, Namecheap, Name.com, AWS Route 53, or Vultr). Support for Let's Encrypt and all these providers was made possible via [the ACME.js library](https://git.rootprojects.org/root/acme.js) by AJ ONeal / Root.
+- Added a UI to manage TLS certificates, including the ability to manually upload them.
+- Dependency updates, refactorings, and minor bugfixes.
+
 ### v0.262 (2020-04-11)
 - Updated dependencies, including Meteor to 1.10.1.
 - `shm_open()` and friends can now be used in Sandstorm app sandboxes (because `/dev/shm` is now created as a temporary directory). Thanks @zenhack.

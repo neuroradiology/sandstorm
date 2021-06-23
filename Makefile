@@ -36,7 +36,7 @@ EKAM=ekam
 #   entirely sure what changed, but this seems like a backwards incompatibility
 #   in libstdc++. See also issue #3171.
 METEOR_DEV_BUNDLE=$(shell ./find-meteor-dev-bundle.sh)
-METEOR_SPK_VERSION=0.3.2
+METEOR_SPK_VERSION=0.5.1
 METEOR_SPK=$(PWD)/meteor-spk-$(METEOR_SPK_VERSION)/meteor-spk
 NODEJS=$(METEOR_DEV_BUNDLE)/bin/node
 NODE_HEADERS=$(METEOR_DEV_BUNDLE)/include/node
@@ -71,6 +71,7 @@ IMAGES= \
     shell/public/menu.svg \
     shell/public/notification.svg \
     shell/public/open-grain.svg \
+    shell/public/openid.svg \
     shell/public/people.svg \
     shell/public/question-727272.svg \
     shell/public/question-a9a9a9.svg \
@@ -121,6 +122,7 @@ IMAGES= \
                                   \
     shell/public/github-color.svg \
     shell/public/google-color.svg \
+    shell/public/openid-color.svg \
     shell/public/email-494949.svg \
     shell/public/close-FFFFFF.svg \
                                   \
@@ -142,7 +144,7 @@ IMAGES= \
 all: sandstorm-$(BUILD).tar.xz
 
 clean: ci-clean
-	rm -rf shell/node_modules shell/.meteor/local $(IMAGES) shell/imports/client/changelog.html *.sig *.update-sig icons/node_modules shell/public/icons/icons-*.eot shell/public/icons/icons-*.ttf shell/public/icons/icons-*.svg shell/public/icons/icons-*.woff icons/package-lock.json tests/package-lock.json deps/llvm-build meteor-testapp/node_modules
+	rm -rf shell/node_modules shell/.meteor/local $(IMAGES) shell/imports/client/changelog.html *.sig *.update-sig icons/node_modules shell/public/icons/icons-*.eot shell/public/icons/icons-*.ttf shell/public/icons/icons-*.svg shell/public/icons/icons-*.woff icons/package-lock.json tests/package-lock.json deps/llvm-build meteor-testapp/node_modules meteor-testapp/package-lock.json
 	@# Note: capnproto, libseccomp, and node-capnp are integrated into the common build.
 	cd deps/ekam && make clean
 	rm -rf deps/libsodium/build
@@ -178,7 +180,7 @@ stylecheck:
 # ====================================================================
 # Dependencies
 
-DEPS=capnproto ekam libseccomp libsodium node-capnp boringssl clang
+DEPS=capnproto ekam libsodium node-capnp boringssl clang
 
 # We list remotes so that if projects move hosts, we can pull from their new
 # canonical location.
@@ -380,7 +382,7 @@ shell-build: shell/imports/* shell/imports/*/* shell/imports/*/*/* shell/imports
 
 bundle: tmp/.ekam-run shell-build make-bundle.sh localedata-C meteor-bundle-main.js
 	@$(call color,bundle)
-	@./make-bundle.sh
+	@CC=$(CC) ./make-bundle.sh
 
 sandstorm-$(BUILD).tar.xz: bundle
 	@$(call color,compress release bundle)
@@ -437,7 +439,7 @@ $(METEOR_SPK):
 	@$(call color,downloading meteor-spk)
 	@curl https://dl.sandstorm.io/meteor-spk-$(METEOR_SPK_VERSION).tar.xz | tar Jxf -
 
-meteor-testapp-dev:
+meteor-testapp-dev: $(METEOR_SPK)
 	cd meteor-testapp && PATH="$(PWD)/bin:$(PATH)" \
 		$(METEOR_SPK) dev -I../src -I../tmp -s /opt/sandstorm
 

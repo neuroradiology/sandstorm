@@ -67,6 +67,7 @@ public:
     kj::HttpHeaderId hDav;
     kj::HttpHeaderId hLocation;
     kj::HttpHeaderId hOrigin;
+    kj::HttpHeaderId hPermissionsPolicy;
     kj::HttpHeaderId hUserAgent;
     kj::HttpHeaderId hWwwAuthenticate;
     kj::HttpHeaderId hXRealIp;
@@ -78,7 +79,7 @@ public:
 
   GatewayService(kj::Timer& timer, kj::HttpClient& shellHttp, GatewayRouter::Client router,
                  Tables& tables, kj::StringPtr baseUrl, kj::StringPtr wildcardHost,
-                 kj::Maybe<kj::StringPtr> termsPublicId);
+                 kj::Maybe<kj::StringPtr> termsPublicId, bool allowLegacyRelaxedCSP);
 
   kj::Promise<void> cleanupLoop();
   // Must run this to purge expired capabilities.
@@ -147,6 +148,14 @@ private:
   bool isPurging = false;
 
   kj::TaskSet tasks;
+
+  bool allowLegacyRelaxedCSP;
+
+  kj::HttpHeaders defaultHeaders;
+
+  kj::Promise<void> requestHelper(
+      kj::HttpMethod method, kj::StringPtr url, const kj::HttpHeaders& headers,
+      kj::AsyncInputStream& requestBody, Response& response);
 
   kj::Promise<void> send401Unauthorized(Response& response);
   kj::Promise<void> sendError(
@@ -233,7 +242,7 @@ private:
   class TlsKeyCallbackImpl;
 };
 
-class RealIpService: public kj::HttpService {
+class RealIpService final: public kj::HttpService {
   // Wrapper that should be instantiated for each connection to capture IP address in X-Real-IP.
 
 public:
@@ -250,7 +259,7 @@ private:
   bool trustClient = false;
 };
 
-class AltPortService: public kj::HttpService {
+class AltPortService final: public kj::HttpService {
   // Wrapper that should be exported on ports other than the main port. This will redirect
   // clients to the main port where appropriate.
 

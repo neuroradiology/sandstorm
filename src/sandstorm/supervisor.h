@@ -27,7 +27,7 @@
 
 namespace sandstorm {
 
-class SupervisorMain: public AbstractMain {
+class SupervisorMain final: public AbstractMain {
   // Main class for the Sandstorm supervisor.  This program:
   // - Sets up a sandbox for a grain.
   // - Executes the grain in the sandbox.
@@ -97,6 +97,8 @@ private:
   bool keepStdio = false;
   bool devmode = false;
   bool seccompDumpPfc = false;
+  bool useExperimentalSeccompFilter = false;
+  bool logSeccompViolations = false;
   kj::Maybe<uid_t> sandboxUid;  // nullptr = use userns
 
   class SandstormApiImpl;
@@ -115,6 +117,8 @@ private:
   void setupFilesystem();
   void setupStdio();
   void setupSeccomp();
+  void setupSeccompNew();
+  void setupSeccompLegacy();
   void unshareNetwork();
   bool checkIfIpTablesLoaded();
   void maybeFinishMountingProc();

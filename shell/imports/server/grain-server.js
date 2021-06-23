@@ -22,9 +22,10 @@ import { _ } from "meteor/underscore";
 import { Random } from "meteor/random";
 
 import { send as sendEmail } from "/imports/server/email.js";
-import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
+import { waitPromise } from "/imports/server/async-helpers.ts";
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
 import { globalDb } from "/imports/db-deprecated.js";
+import { SandstormPermissions } from "/imports/sandstorm-permissions/permissions.js";
 
 const ROOT_URL = process.env.ROOT_URL;
 
@@ -304,7 +305,7 @@ SandstormDb.periodicCleanup(86400000, () => {
 });
 
 Meteor.methods({
-  newGrain(packageId, command, title, obsolete) {
+  newGrain(packageId, command, title) {
     // Create and start a new grain.
 
     check(packageId, String);

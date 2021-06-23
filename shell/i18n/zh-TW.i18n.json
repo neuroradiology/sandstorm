@@ -40,9 +40,6 @@
       "title": "查無此沙",
       "text": "404 查無此沙 :("
     },
-    "root": {
-      "title": "首頁"
-    },
     "grainLogContents": {
       "prefix": "……"
     },
@@ -1455,8 +1452,7 @@
       },
       "_loginButtonsLoggedOutDropdown": {
         "demo": {
-          "title": "Create account",
-          "explanation": "Your demo data will be transferred to your new account."
+          "title": "Create account"
         },
         "title": "登入",
         "shared": {

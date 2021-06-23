@@ -476,6 +476,45 @@ public:
                   .build();
             },
             "Uninstall Sandstorm.")
+        .addSubCommand("create-acme-account",
+            [this]() {
+              return kj::MainBuilder(context, VERSION,
+                      "Instructs Sandstorm to register an ACME account (e.g. Let's Encrypt) "
+                      "using the given email address. The ACME account can be used to obtain "
+                      "TLS certificates.")
+                  .addOptionWithArg({"directory"}, KJ_BIND_METHOD(*this, setAcmeDirectory),
+                      "<url>", "Set the ACME service directory URL. Defaults to Let's Encrypt.")
+                  .addOption({"accept-terms"}, [this]() { acceptedAcmeTos = true; return true; },
+                      "Indicates that you accept the ACME service's terms of service.")
+                  .expectArg("<email>", KJ_BIND_METHOD(*this, createAcmeAccount))
+                  .build();
+            },
+            "Create ACME (Let's Encrypt) account.")
+        .addSubCommand("configure-acme-challenge",
+            [this]() {
+              return kj::MainBuilder(context, VERSION,
+                      "Configures Sandstorm with information about your DNS provider to be "
+                      "used to pass ACME challenges in order to issue TLS certificates. "
+                      "The npm module `acme-dns-01-<module>` shall be used to pass challenges, "
+                      "with <json> (a JSON string) parsed and passed to the module's constructor. "
+                      "Only certain modules are supported; see the documentation for info. "
+                      "This command is not necessary for sandcats.io users.")
+                  .expectArg("<module>", KJ_BIND_METHOD(*this, setAcmeChallengeModule))
+                  .expectArg("<json>", KJ_BIND_METHOD(*this, configureAcmeChallenge))
+                  .build();
+            },
+            "Configure DNS provider for ACME challenges.")
+        .addSubCommand("renew-certificate",
+            [this]() {
+              return kj::MainBuilder(context, VERSION,
+                      "Try to renew the server's certificate with ACME right now. ACME renewal "
+                      "usually happens automatically in the background; you should only use this "
+                      "command if you have recently changed your ACME config and want to "
+                      "get a certificate immediately.")
+                  .callAfterParsing(KJ_BIND_METHOD(*this, renewCertificateNow))
+                  .build();
+            },
+            "Renew the server's SSL/TLS certificate with ACME.")
         .build();
   }
 
@@ -760,7 +799,7 @@ public:
     const Config config = readConfig();
 
     // We'll run under the chroot.
-    enterChroot(false);
+    enterChroot(nullptr, false);
 
     // Don't run as root.
     dropPrivs(config.uids);
@@ -1107,6 +1146,119 @@ public:
     KJ_FAIL_SYSCALL("exec(node)", errno);
   }
 
+  class ShellCliClient {
+  public:
+    ShellCliClient(RunBundleMain& main, kj::Network& network)
+        : main(main),
+          bundleDir(main.getInstallDir()),
+          sandstormHome(kj::str(bundleDir.slice(0, KJ_ASSERT_NONNULL(bundleDir.findLast('/'))))),
+          cap(network.parseAddress(
+                kj::str("unix:", sandstormHome, "/var/sandstorm/socket/shell-cli"))
+              .then([this](kj::Own<kj::NetworkAddress> addr) {
+            auto promise = addr->connect();
+            return promise.attach(kj::mv(addr))
+                .then([this](kj::Own<kj::AsyncIoStream> conn) {
+              rpcSystem = kj::heap<capnp::TwoPartyClient>(*conn).attach(kj::mv(conn));
+              return rpcSystem->bootstrap().castAs<ShellCli>();
+            });
+          })) {}
+
+    ShellCli::Client getCap() { return cap; }
+
+    kj::Promise<void> finish(kj::Promise<void> promise) {
+      return promise.then([this]() {
+        main.context.exitInfo("success");
+      }, [this](kj::Exception&& e) {
+        KJ_LOG(INFO, e);
+        auto message = kj::str("ERROR: ", e.getDescription(),
+            "\nThere might be more information in: ", getLogLocation());
+        main.context.exitError(message);
+      });
+    }
+
+    kj::String getLogLocation() {
+      return kj::str(sandstormHome, "/var/log/sandstorm.log");
+    }
+
+  private:
+    RunBundleMain& main;
+    kj::String bundleDir;
+    kj::String sandstormHome;
+    ShellCli::Client cap;
+    kj::Own<capnp::TwoPartyClient> rpcSystem;
+  };
+
+  static constexpr kj::StringPtr LETS_ENCRYPT = "https://acme-v02.api.letsencrypt.org/directory"_kj;
+  kj::StringPtr acmeDirectory = LETS_ENCRYPT;
+  bool acceptedAcmeTos = false;
+  bool setAcmeDirectory(kj::StringPtr param) {
+    acmeDirectory = param;
+    return true;
+  }
+
+  kj::MainBuilder::Validity createAcmeAccount(kj::StringPtr email) {
+    if (!acceptedAcmeTos) {
+      if (acmeDirectory == LETS_ENCRYPT) {
+        context.exitError(
+            "You must accept Let's Encrypt's subscriber agreement. Pass the flag "
+            "--accept-terms if you have read and accepted the agreement. You can find the "
+            "agreement at: https://letsencrypt.org/repository/");
+      } else {
+        context.exitError(
+            "You must accept your ACME provider's Terms of Service. Pass the flag "
+            "--accept-terms if you have read and accepted your ACME provider's terms.");
+      }
+    }
+
+    auto io = kj::setupAsyncIo();
+    ShellCliClient client(*this, io.provider->getNetwork());
+
+    client.finish(kj::retryOnDisconnect([&]() {
+      auto req = client.getCap().createAcmeAccountRequest();
+      req.setDirectory(acmeDirectory);
+      req.setEmail(email);
+      req.setAgreeToTerms(acceptedAcmeTos);
+      return req.send().ignoreResult();
+    })).wait(io.waitScope);
+    KJ_UNREACHABLE;
+  }
+
+  kj::StringPtr acmeChallengeModule;
+  kj::MainBuilder::Validity setAcmeChallengeModule(kj::StringPtr module) {
+    auto path = kj::str(getInstallDir(), "/programs/server/npm/node_modules/acme-dns-01-", module);
+    if (access(path.cStr(), F_OK) < 0) {
+      return kj::str("unknown module: ", module);
+    }
+    acmeChallengeModule = module;
+    return true;
+  }
+  bool configureAcmeChallenge(kj::StringPtr options) {
+    auto io = kj::setupAsyncIo();
+    ShellCliClient client(*this, io.provider->getNetwork());
+
+    client.finish(kj::retryOnDisconnect([&]() {
+      auto req = client.getCap().setAcmeChallengeRequest();
+      req.setModule(acmeChallengeModule);
+      req.setOptions(options);
+      return req.send().ignoreResult();
+    })).wait(io.waitScope);
+    KJ_UNREACHABLE;
+  }
+
+  bool renewCertificateNow() {
+    auto io = kj::setupAsyncIo();
+    ShellCliClient client(*this, io.provider->getNetwork());
+
+    context.warning(kj::str("This may take a while. You may be able to see progress in the logs: ",
+        client.getLogLocation()));
+
+    client.finish(kj::retryOnDisconnect([&]() {
+      auto req = client.getCap().renewCertificateNowRequest();
+      return req.send().ignoreResult();
+    })).wait(io.waitScope);
+    KJ_UNREACHABLE;
+  }
+
 private:
   kj::ProcessContext& context;
 
@@ -1280,7 +1432,7 @@ private:
     }
   }
 
-  void enterChroot(bool inPidNamespace) {
+  void enterChroot(kj::Maybe<const UserIds&> chownCgroupsTo, bool inPidNamespace) {
     KJ_REQUIRE(changedDir);
 
     // Verify ownership is intact.
@@ -1369,6 +1521,53 @@ private:
     // And just in case the user has /etc/resolv.conf as a symlink to something we haven't linked
     // in, copy its contents to /etc/resolv.conf.host-initial so we can use that if needed.
     backupResolvConf();
+
+    // Best effort attempt to set up cgroup2. Depending on system configuration
+    // this may not be possible; if not we continue without cgroup support.
+    KJ_SYSCALL_HANDLE_ERRORS(unshare(CLONE_NEWCGROUP)) {
+      case EINVAL:
+        // Might happen on very old kernels before CLONE_NEWCGROUP was defined.
+        break;
+      default:
+        KJ_FAIL_SYSCALL("unshare(CLONE_NEWCGROUP)", error);
+    } else {
+      KJ_SYSCALL(mkdir("run/cgroup2", 0700));
+      KJ_SYSCALL_HANDLE_ERRORS(mount("none", "run/cgroup2", "cgroup2", MS_NOSUID | MS_NOEXEC, nullptr)) {
+        default:
+          // This could fail if the kernel is new enough to support cgroup namespaces, but
+          // wasn't actually built with cgroup support (CONFIG_CGORUPS) enabled; in this case
+          // unshare() silently ignores the relevant flag, so we'd get an error here.
+          //
+          // Get rid of the mount point, so attempts to open it later will fail:
+          KJ_SYSCALL(rmdir("run/cgroup2"));
+      } else {
+        KJ_IF_MAYBE(uids, chownCgroupsTo) {
+          // Give our unprivileged selves access to manage the cgroup.
+          // See the 'Delegation' section of 'Documentation/admin-guide/cgroup-v2.txt'
+          // in the Linux kernel source tree.
+          //
+          // We only do this if we were given uids to work with; we don't need to do
+          // this if the sandbox is already set up, so commands that expect
+          // an already running sandstorm will pass us nullptr to indicate that
+          // we don't need to do this.
+          //
+          // Additionally, we *can't* do this if we weren't started as root, so in
+          // that case we just skip it. Other parts of the system are built to
+          // handle the case where this isn't available gracefully.
+          if(runningAsRoot) {
+            KJ_SYSCALL(chown("run/cgroup2", uids->uid, uids->gid));
+            KJ_SYSCALL(chown("run/cgroup2/cgroup.procs", uids->uid, uids->gid));
+            KJ_SYSCALL(chown("run/cgroup2/cgroup.subtree_control", uids->uid, uids->gid));
+            // This one doesn't exist on earlier kernels (it appeared some time after 4.6).
+            // If it's absent don't worry about it; we don't use it currently anyway.
+            KJ_SYSCALL_HANDLE_ERRORS(access("run/cgroup2/cgroup.threads", F_OK)) {
+            } else {
+              KJ_SYSCALL(chown("run/cgroup2/cgroup.threads", uids->uid, uids->gid));
+            }
+          }
+        }
+      }
+    }
 
     // OK, change our root directory.
     KJ_SYSCALL(syscall(SYS_pivot_root, ".", "tmp"));
@@ -1607,6 +1806,12 @@ private:
           kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
     }
 
+    kj::AutoCloseFd consumeClientFd(LinkId id) {
+      auto iter = links.find(id);
+      KJ_REQUIRE(iter != links.end());
+      return kj::mv(iter->second.client);
+    }
+
     kj::Own<kj::AsyncCapabilityStream> consumeServer(
         LinkId id, kj::LowLevelAsyncIoProvider& provider) {
       auto iter = links.find(id);
@@ -1833,7 +2038,20 @@ private:
 
     setProcessName("montr", "(server monitor)");
 
-    enterChroot(true);
+    enterChroot(config.uids, true);
+
+    // Make sure socket directory exists (since the installer doesn't create it).
+    if (mkdir("/var/sandstorm/socket", 0770) == 0) {
+      // Allow group to use this directory.
+      if (runningAsRoot) { KJ_SYSCALL(chown("/var/sandstorm/socket", 0, config.uids.gid)); }
+    } else {
+      int error = errno;
+      if (error != EEXIST) {
+        KJ_FAIL_SYSCALL("mkdir(/var/sandstorm/socket)", error);
+      }
+    }
+    // Make sure umask didn't mask away the permissions we wanted.
+    KJ_SYSCALL(chmod("/var/sandstorm/socket", 0770));
 
     // For later use when killing children with timeout.
     registerAlarmHandler();
@@ -2165,12 +2383,38 @@ private:
 
       auto paf = kj::newPromiseAndFulfiller<Backend::Client>();
       TwoPartyServerWithClientBootstrap server(kj::mv(paf.promise));
-      paf.fulfiller->fulfill(kj::heap<BackendImpl>(*io.lowLevelProvider, network,
-        server.getBootstrap().castAs<SandstormCoreFactory>(), sandboxUid));
+
+      // Collect all of the grains' cgroups into a single
+      // container, so they can't collectively starve sandstorm
+      // itself.
+      kj::Maybe<Cgroup> grainsCgroup;
+      kj::runCatchingExceptions([&grainsCgroup]() {
+        grainsCgroup = Cgroup("/run/cgroup2").getOrMakeChild("grains");
+      });
+
+      paf.fulfiller->fulfill(kj::heap<BackendImpl>(
+        *io.lowLevelProvider,
+        network,
+        server.getBootstrap().castAs<SandstormCoreFactory>(),
+        kj::mv(grainsCgroup),
+        sandboxUid,
+        config.useExperimentalSeccompFilter,
+        config.logSeccompViolations));
 
       auto gatewayServer = kj::heap<capnp::TwoPartyServer>(kj::refcounted<CapRedirector>([&]() {
         return server.getBootstrap().castAs<SandstormCoreFactory>()
             .getGatewayRouterRequest().send().getRouter();
+      }));
+
+      // Listen for connections on the shell CLI socket and forward them to the shell. We do this
+      // in the backend, rather than in the shell itself, mainly because node-capnp lacks support
+      // for creating listen sockets.
+      unlink("/var/sandstorm/socket/shell-cli");
+      auto shellCliListener = network.parseAddress("unix:/var/sandstorm/socket/shell-cli")
+          .wait(io.waitScope)->listen();
+      auto shellCliServer = kj::heap<capnp::TwoPartyServer>(kj::refcounted<CapRedirector>([&]() {
+        return server.getBootstrap().castAs<SandstormCoreFactory>()
+            .getShellCliRequest().send().getShellCli();
       }));
 
       // Signal readiness.
@@ -2179,6 +2423,7 @@ private:
 
       server.listen(kj::mv(listener))
           .exclusiveJoin(gatewayServer->listen(*gatewayListener))
+          .exclusiveJoin(shellCliServer->listen(*shellCliListener))
           // Rotate logs, keeping 1-2MB worth. We do this in the backend process mainly because
           // it is the only asynchronous process in run-bundle.c++.
           .exclusiveJoin(rotateLog(io.provider->getTimer(),
@@ -2235,7 +2480,8 @@ private:
       GatewayService service(io.provider->getTimer(), *shellHttp, kj::cp(router),
                              gatewayTables, config.rootUrl, config.wildcardHost,
                              config.termsPublicId.map(
-                                 [](const kj::String& str) -> kj::StringPtr { return str; }));
+                                 [](const kj::String& str) -> kj::StringPtr { return str; }),
+                             config.allowLegacyRelaxedCSP);
 
       kj::HttpHeaderId hXRealIp = headerTableBuilder.add("X-Real-Ip");
 
@@ -2320,6 +2566,11 @@ private:
       } else {
         buildstamp = kj::str(SANDSTORM_BUILD);
       }
+
+      // Provide the path to a home directory. This is only required as a
+      // workaround to make the call to os.homedir() in the `clean-stack`
+      // npm package succeed.
+      KJ_SYSCALL(setenv("HOME", "/var", true));
 
       kj::String settingsString = makeMeteorSettings(config, buildstamp);
       KJ_SYSCALL(setenv("METEOR_SETTINGS", settingsString.cStr(), true));
@@ -2770,17 +3021,6 @@ private:
     setProcessName("devd", "(dev daemon)");
 
     clearDevPackages(config);
-
-    // Make sure socket directory exists (since the installer doesn't create it).
-    if (mkdir("/var/sandstorm/socket", 0770) == 0) {
-      // Allow group to use this directory.
-      if (runningAsRoot) { KJ_SYSCALL(chown("/var/sandstorm/socket", 0, config.uids.gid)); }
-    } else {
-      int error = errno;
-      if (error != EEXIST) {
-        KJ_FAIL_SYSCALL("mkdir(/var/sandstorm/socket)", error);
-      }
-    }
 
     // Create the devmode socket.
     int sock_;

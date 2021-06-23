@@ -19,6 +19,7 @@ import { Match, check } from "meteor/check";
 import { _ } from "meteor/underscore";
 import { Accounts } from "meteor/accounts-base";
 import { Random } from "meteor/random";
+import { ServiceConfiguration } from "meteor/service-configuration";
 
 import Fs from "fs";
 import Crypto from "crypto";
@@ -30,9 +31,12 @@ import { fillUndefinedForChangedDoc } from "/imports/server/observe-helpers.js";
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
 import { globalDb } from "/imports/db-deprecated.js";
 import { computeStats } from "/imports/server/stats-server.js";
+import { HTTP } from "meteor/http";
+import { createAcmeAccount, renewCertificateNow } from "/imports/server/acme.js";
+import { Issuer } from "openid-client";
 
 const publicAdminSettings = [
-  "google", "github", "ldap", "saml", "emailToken", "splashUrl", "signupDialog",
+  "google", "github", "ldap", "oidc", "saml", "emailToken", "splashUrl", "signupDialog",
   "adminAlert", "adminAlertTime", "adminAlertUrl", "termsUrl",
   "privacyUrl", "appMarketUrl", "appIndexUrl", "appUpdatesEnabled",
   "serverTitle", "returnAddress", "ldapNameField", "organizationMembership",
@@ -65,7 +69,7 @@ Meteor.methods({
     check(value, Boolean);
 
     // Only check configurations for OAuth services.
-    const oauthServices = ["google", "github"];
+    const oauthServices = ["google", "github", "oidc"];
     if (value && (oauthServices.indexOf(serviceName) != -1)) {
       const config = ServiceConfiguration.configurations.findOne({ service: serviceName });
       if (!config) {
@@ -76,6 +80,13 @@ Meteor.methods({
       if (!config.clientId || !config.secret) {
         throw new Meteor.Error(403, "You must provide a non-empty clientId and secret for the " +
           serviceName + " service before you can enable it. Click the \"configure\" link.");
+      }
+
+      if (serviceName === "oidc") {
+        if (!config.serverUrl || !config.clientAuthMethod || !config.issuer) {
+          throw new Meteor.Error(403, "You must provide a full set of server parameters for the " +
+            serviceName + " service before you can enable it. Click the \"configure\" link.");
+        }
       }
     }
 
@@ -122,6 +133,9 @@ Meteor.methods({
         ldap: {
           enabled: Boolean,
         },
+        oidc: {
+          enabled: Boolean,
+        },
         saml: {
           enabled: Boolean,
         },
@@ -140,7 +154,23 @@ Meteor.methods({
     checkAuth(token);
     check(options, Match.ObjectIncluding({ service: String }));
 
-    ServiceConfiguration.configurations.upsert({ service: options.service }, options);
+    if (options.service === "oidc" && options.serverUrl) {
+      return Issuer.discover(options.serverUrl).then(function(issuer) {
+
+        // 'Proof Key for Code Exchange' (response_type === 'code') is not yet supported.
+        // An additional code_challenge parameter would have to be added when generating the authorizationUrl.
+        if (issuer.metadata.response_types_supported.indexOf("id_token") === -1) {
+          throw new Meteor.Error(403, "The provided identity server does not support the 'id_token' response type.");
+        }
+
+        options.issuer = issuer.metadata;
+        ServiceConfiguration.configurations.upsert({ service: options.service }, options);
+      }).catch(function(_err) {
+        throw new Meteor.Error(403, "Could not discover an OpenID Connect endpoint at the provided URL.");
+      });
+    } else {
+      ServiceConfiguration.configurations.upsert({ service: options.service }, options);
+    }
   },
 
   clearResumeTokensForService: function (token, serviceName) {
@@ -370,8 +400,8 @@ Meteor.methods({
     this.connection.sandstormDb.setPreinstalledApps(appAndPackageIds);
   },
 
-  setTlsKeys: function (keys) {
-    checkAuth();
+  setTlsKeys: function (token, keys) {
+    checkAuth(token);
     check(keys, {
       key: String,
       certChain: String
@@ -384,6 +414,73 @@ Meteor.methods({
 
     globalDb.collections.settings.upsert({ _id: "tlsKeys" }, { $set: { value: keys } });
   },
+
+  forgetAcmeAccount: function (token) {
+    checkAuth(token);
+    globalDb.collections.settings.remove({ _id: "acmeAccount" });
+  },
+
+  forgetAcmeChallenge: function (token) {
+    checkAuth(token);
+    globalDb.collections.settings.remove({ _id: "acmeChallenge" });
+  },
+
+  fetchAcmeDirectory: function (token, url) {
+    checkAuth(token);
+    check(url, String);
+    let response = HTTP.get(url);
+
+    if (response.statusCode != 200) {
+      throw new Meteor.Error("bad_acme_directory",
+          "Directory service responded with status code: " + response.statusCode);
+    }
+    if (!response.data) {
+      throw new Meteor.Error("bad_acme_directory",
+          "Directory service didn't return JSON.");
+    }
+
+    return response.data;
+  },
+
+  createAcmeAccount: function (token, directory, email, agreeToTerms) {
+    checkAuth(token);
+    check(directory, String);
+    check(email, String);
+    check(agreeToTerms, Boolean);
+
+    try {
+      createAcmeAccount(directory, email, agreeToTerms);
+    } catch (err) {
+      throw new Meteor.Error("couldnt_create_acme_account", err.message);
+    }
+  },
+
+  setAcmeChallenge: function (token, module, options) {
+    checkAuth(token);
+    check(module, ModuleName);
+    check(options, Object);
+
+    options = SandstormDb.escapeMongoObject(options);
+
+    globalDb.collections.settings.upsert({_id: "acmeChallenge"},
+        {$set: { value: { module, options } }});
+  },
+
+  renewCertificateNow: function (token) {
+    checkAuth(token);
+    this.unblock();
+
+    try {
+      renewCertificateNow();
+    } catch (err) {
+      throw new Meteor.Error("couldnt_renew_cert", err.message);
+    }
+  }
+});
+
+let ModuleName = Match.Where(name => {
+  check(name, String);
+  return !!name.match(/^[a-zA-Z0-9_-]*$/);
 });
 
 const authorizedAsAdmin = function (token, userId) {

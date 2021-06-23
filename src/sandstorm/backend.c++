@@ -48,10 +48,21 @@ static void tryRecursivelyDelete(kj::StringPtr path) {
   recursivelyDelete(tmpPath);
 }
 
-BackendImpl::BackendImpl(kj::LowLevelAsyncIoProvider& ioProvider, kj::Network& network,
-  SandstormCoreFactory::Client&& sandstormCoreFactory, kj::Maybe<uid_t> sandboxUid)
+BackendImpl::BackendImpl(
+  kj::LowLevelAsyncIoProvider& ioProvider,
+  kj::Network& network,
+  SandstormCoreFactory::Client&& sandstormCoreFactory,
+  kj::Maybe<Cgroup>&& cgroup,
+  kj::Maybe<uid_t> sandboxUid,
+  bool useExperimentalSeccompFilter,
+  bool logSeccompViolations)
     : ioProvider(ioProvider), network(network), coreFactory(kj::mv(sandstormCoreFactory)),
-      sandboxUid(sandboxUid), tasks(*this) {}
+      sandboxUid(sandboxUid),
+      tasks(*this),
+      cgroup(kj::mv(cgroup)),
+      useExperimentalSeccompFilter(useExperimentalSeccompFilter),
+      logSeccompViolations(logSeccompViolations)
+    {}
 
 void BackendImpl::taskFailed(kj::Exception&& exception) {
   KJ_LOG(ERROR, exception);
@@ -65,36 +76,46 @@ kj::Promise<Supervisor::Client> BackendImpl::bootGrain(
     bool isRetry) {
   auto iter = supervisors.find(grainId);
   if (iter != supervisors.end()) {
-    KJ_REQUIRE(!isNew, "new grain matched existing grainId");
+    KJ_SWITCH_ONEOF(iter->second) {
+      KJ_CASE_ONEOF(g, BackingUpGrain) {
+        // Wait until it's done backing up, and try again.
+        return g.promise.addBranch().then([=]() {
+            return bootGrain(grainId, packageId, command, isNew, devMode, mountProc, isRetry);
+        });
+      }
+      KJ_CASE_ONEOF(g, StartingGrain) {
+        KJ_REQUIRE(!isNew, "new grain matched existing grainId");
 
-    // Supervisor for this grain is already running. Join that.
-    return iter->second.promise.addBranch()
-        .then([=](Supervisor::Client&& client) mutable {
-      // We should send a keepAlive() to make sure the supervisor is still up. We should also
-      // send a new SandstormCore capability in case the front-end has restarted.
-      auto coreReq = coreFactory.getSandstormCoreRequest();
-      coreReq.setGrainId(grainId);
-      auto keepAliveReq = client.keepAliveRequest();
-      keepAliveReq.setCore(coreReq.send().getCore());
-      auto promise = keepAliveReq.send();
-      return promise.then([KJ_MVCAP(client)](auto) mutable -> kj::Promise<Supervisor::Client> {
-        // Success.
-        return kj::mv(client);
-      }, [=](kj::Exception&& exception) mutable -> kj::Promise<Supervisor::Client> {
-        // Exception?
-        if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
-          // Oops, disconnected. onDisconnect() should have already fired causing the RunningGrain
-          // to unregister itself. Give it an extra turn using evalLater() just in case, then
-          // re-run.
-          KJ_ASSERT(!isRetry, "retry supervisor startup logic failed");
-          return kj::evalLater([=]() mutable {
-            return bootGrain(grainId, packageId, command, isNew, devMode, mountProc, true);
+        // Supervisor for this grain is already running. Join that.
+        return g.promise.addBranch()
+            .then([=](Supervisor::Client&& client) mutable {
+          // We should send a keepAlive() to make sure the supervisor is still up. We should also
+          // send a new SandstormCore capability in case the front-end has restarted.
+          auto coreReq = coreFactory.getSandstormCoreRequest();
+          coreReq.setGrainId(grainId);
+          auto keepAliveReq = client.keepAliveRequest();
+          keepAliveReq.setCore(coreReq.send().getCore());
+          auto promise = keepAliveReq.send();
+          return promise.then([KJ_MVCAP(client)](auto) mutable -> kj::Promise<Supervisor::Client> {
+            // Success.
+            return kj::mv(client);
+          }, [=](kj::Exception&& exception) mutable -> kj::Promise<Supervisor::Client> {
+            // Exception?
+            if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
+              // Oops, disconnected. onDisconnect() should have already fired causing the RunningGrain
+              // to unregister itself. Give it an extra turn using evalLater() just in case, then
+              // re-run.
+              KJ_ASSERT(!isRetry, "retry supervisor startup logic failed");
+              return kj::evalLater([=]() mutable {
+                return bootGrain(grainId, packageId, command, isNew, devMode, mountProc, true);
+              });
+            } else {
+              return kj::mv(exception);
+            }
           });
-        } else {
-          return kj::mv(exception);
-        }
-      });
-    });
+        });
+      }
+    }
   }
 
   // Grain is not currently running, so let's start it.
@@ -118,6 +139,14 @@ kj::Promise<Supervisor::Client> BackendImpl::bootGrain(
     if (mountProc) {
       argv.add(kj::heapString("--proc"));
     }
+  }
+
+  if (useExperimentalSeccompFilter) {
+    argv.add(kj::heapString("--use-experimental-seccomp-filter"));
+  }
+
+  if (logSeccompViolations) {
+    argv.add(kj::heapString("--log-seccomp-violations"));
   }
 
   for (auto env: command.getEnviron()) {
@@ -161,14 +190,21 @@ kj::Promise<Supervisor::Client> BackendImpl::bootGrain(
   auto addressPromise =
       network.parseAddress(kj::str("unix:/var/sandstorm/grains/", grainId, "/socket"));
 
-  // When both of those are done, connect to the address.
+  // When both of those are done, connect to the address, and move the
+  // supervisor into a cgroup.
   auto finalPromise = promise
-      .then([this,KJ_MVCAP(addressPromise)](size_t n) mutable {
+      .then([KJ_MVCAP(addressPromise)](size_t n) mutable {
     return kj::mv(addressPromise);
   }).then([](kj::Own<kj::NetworkAddress>&& address) {
     return address->connect();
   }).then([this,KJ_MVCAP(stdoutPipe),KJ_MVCAP(process),grainId = kj::heapString(grainId)]
           (kj::Own<kj::AsyncIoStream>&& connection) mutable {
+
+    KJ_IF_MAYBE(cg, cgroup) {
+      cg->getOrMakeChild(grainId)
+          .addPid(process.getPid());
+    }
+
     // Connected. Create the RunningGrain and fulfill promises.
     auto ignorePromise = ignoreAll(*stdoutPipe);
     tasks.add(ignorePromise.attach(kj::mv(stdoutPipe)));
@@ -229,6 +265,9 @@ BackendImpl::RunningGrain::RunningGrain(
 
 BackendImpl::RunningGrain::~RunningGrain() noexcept(false) {
   backend.supervisors.erase(grainId);
+  KJ_IF_MAYBE(cg, backend.cgroup) {
+    cg->removeChild(grainId);
+  }
 }
 
 kj::Promise<void> BackendImpl::ping(PingContext context) {
@@ -249,27 +288,37 @@ kj::Promise<void> BackendImpl::getGrain(GetGrainContext context) {
   auto grainId = context.getParams().getGrainId();
   auto iter = supervisors.find(validateId(grainId));
   if (iter != supervisors.end()) {
-    return iter->second.promise.addBranch()
-        .then([this,context,grainId](Supervisor::Client client) mutable {
-      // We should send a keepAlive() to make sure the supervisor is still up. We should also
-      // send a new SandstormCore capability in case the front-end has restarted.
-      auto coreReq = coreFactory.getSandstormCoreRequest();
-      coreReq.setGrainId(grainId);
-      auto keepAliveReq = client.keepAliveRequest();
-      keepAliveReq.setCore(coreReq.send().getCore());
-      return keepAliveReq.send()
-          .then([context,KJ_MVCAP(client)](auto&&) mutable -> kj::Promise<void> {
-        context.getResults().setSupervisor(kj::mv(client));
-        return kj::READY_NOW;
-      }, [](kj::Exception&& e) -> kj::Promise<void> {
-        if (e.getType() != kj::Exception::Type::DISCONNECTED) {
-          KJ_LOG(ERROR, "Exception when trying to keepAlive() a supervisor in getGrain().", e);
-          return KJ_EXCEPTION(DISCONNECTED, "grain is not running");
-        } else {
-          return kj::mv(e);
-        }
-      });
-    });
+    KJ_SWITCH_ONEOF(iter->second) {
+      KJ_CASE_ONEOF(g, BackingUpGrain) {
+        // Wait for the backup to complete, then try again
+        return g.promise.addBranch().then([this,context]() {
+            return getGrain(context);
+        });
+      }
+      KJ_CASE_ONEOF(g, StartingGrain) {
+        return g.promise.addBranch()
+            .then([this,context,grainId](Supervisor::Client client) mutable {
+          // We should send a keepAlive() to make sure the supervisor is still up. We should also
+          // send a new SandstormCore capability in case the front-end has restarted.
+          auto coreReq = coreFactory.getSandstormCoreRequest();
+          coreReq.setGrainId(grainId);
+          auto keepAliveReq = client.keepAliveRequest();
+          keepAliveReq.setCore(coreReq.send().getCore());
+          return keepAliveReq.send()
+              .then([context,KJ_MVCAP(client)](auto&&) mutable -> kj::Promise<void> {
+            context.getResults().setSupervisor(kj::mv(client));
+            return kj::READY_NOW;
+          }, [](kj::Exception&& e) -> kj::Promise<void> {
+            if (e.getType() != kj::Exception::Type::DISCONNECTED) {
+              KJ_LOG(ERROR, "Exception when trying to keepAlive() a supervisor in getGrain().", e);
+              return KJ_EXCEPTION(DISCONNECTED, "grain is not running");
+            } else {
+              return kj::mv(e);
+            }
+          });
+        });
+      }
+    }
   }
 
   return KJ_EXCEPTION(DISCONNECTED, "grain is not running");
@@ -280,18 +329,27 @@ kj::Promise<void> BackendImpl::deleteGrain(DeleteGrainContext context) {
   auto iter = supervisors.find(grainId);
   kj::Promise<void> shutdownPromise = nullptr;
   if (iter != supervisors.end()) {
-    shutdownPromise = iter->second.promise.addBranch()
-        .then([context](Supervisor::Client client) mutable {
-      return client.shutdownRequest().send().ignoreResult();
-    }).then([]() -> kj::Promise<void> {
-      return KJ_EXCEPTION(FAILED, "expected shutdown() to throw disconnected exception");
-    }, [](kj::Exception&& e) -> kj::Promise<void> {
-      if (e.getType() == kj::Exception::Type::DISCONNECTED) {
-        return kj::READY_NOW;
-      } else {
-        return kj::mv(e);
+    KJ_SWITCH_ONEOF(iter->second) {
+      KJ_CASE_ONEOF(g, BackingUpGrain) {
+        return g.promise.addBranch().then([this, context]() {
+          return deleteGrain(context);
+        });
       }
-    });
+      KJ_CASE_ONEOF(g, StartingGrain) {
+        shutdownPromise = g.promise.addBranch()
+            .then([](Supervisor::Client client) mutable {
+          return client.shutdownRequest().send().ignoreResult();
+        }).then([]() -> kj::Promise<void> {
+          return KJ_EXCEPTION(FAILED, "expected shutdown() to throw disconnected exception");
+        }, [](kj::Exception&& e) -> kj::Promise<void> {
+          if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+            return kj::READY_NOW;
+          } else {
+            return kj::mv(e);
+          }
+        });
+      }
+    }
   } else {
     shutdownPromise = kj::READY_NOW;
   }
@@ -313,7 +371,7 @@ kj::Promise<void> BackendImpl::deleteUser(DeleteUserContext context) {
 
 // =======================================================================================
 
-class BackendImpl::PackageUploadStreamImpl: public Backend::PackageUploadStream::Server {
+class BackendImpl::PackageUploadStreamImpl final: public Backend::PackageUploadStream::Server {
 public:
   PackageUploadStreamImpl(BackendImpl& backend, Pipe inPipe = Pipe::make(),
                           Pipe outPipe = Pipe::make())
@@ -353,7 +411,7 @@ protected:
   }
 
   kj::Promise<void> done(DoneContext context) override {
-    auto forked = writeQueue.then([this,context]() mutable {
+    auto forked = writeQueue.then([this]() mutable {
       KJ_REQUIRE(inputWriteEnd != nullptr, "called done() multiple times");
       inputWriteEnd = nullptr;
       inputWriteFd = nullptr;
@@ -476,11 +534,32 @@ kj::Promise<void> BackendImpl::deletePackage(DeletePackageContext context) {
 // =======================================================================================
 
 kj::Promise<void> BackendImpl::backupGrain(BackupGrainContext context) {
+  kj::Maybe<Cgroup::FreezeHandle> freezeHandle;
+  kj::Maybe<kj::Own<kj::PromiseFulfiller<void>>> backupFulfiller;
+
   auto params = context.getParams();
 
+  auto grainId = params.getGrainId();
   auto path = kj::str("/var/sandstorm/backups/", params.getBackupId());
+
+  auto iter = supervisors.find(grainId);
+  if(iter == supervisors.end()) {
+    // Not running. Mark the grain as backing up, so nobody tries to boot it
+    // until we're done:
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    supervisors.insert(std::make_pair(grainId, BackingUpGrain{paf.promise.fork()}));
+    backupFulfiller = kj::mv(paf.fulfiller);
+  } else {
+    // If cgroups is available, freeze the corresponding cgroup
+    // during the backup:
+    KJ_IF_MAYBE(cg, cgroup) {
+      auto grainCgroup = cg->getChild(grainId);
+      freezeHandle = grainCgroup.freeze();
+    }
+  }
+
   recursivelyCreateParent(path);
-  auto grainDir = kj::str("/var/sandstorm/grains/", params.getGrainId());
+  auto grainDir = kj::str("/var/sandstorm/grains/", grainId);
 
   // Similar to the supervisor, the "backup" command sets up its own sandbox, and for that to work
   // we need to pass along root privileges to it.
@@ -513,10 +592,20 @@ kj::Promise<void> BackendImpl::backupGrain(BackupGrainContext context) {
   auto promise = capnp::writeMessage(*output, *metadataMsg);
 
   return promise.attach(kj::mv(metadataMsg), kj::mv(metadataStreamFd), kj::mv(output))
-      .then([KJ_MVCAP(process)]() mutable {
+      .then([
+          this,
+          grainId,
+          KJ_MVCAP(process),
+          KJ_MVCAP(freezeHandle),
+          KJ_MVCAP(backupFulfiller)
+      ]() mutable {
     // TODO(cleanup): We should probably use a SubprocessSet to wait asynchronously, but that
     //   means we need to use SubprocessSet everywhere...
     process.waitForSuccess();
+    KJ_IF_MAYBE(f, backupFulfiller) {
+      (*f)->fulfill();
+      supervisors.erase(grainId);
+    }
   });
 }
 
@@ -563,7 +652,7 @@ kj::Promise<void> BackendImpl::restoreGrain(RestoreGrainContext context) {
   });
 }
 
-class BackendImpl::FileUploadStream: public ByteStream::Server {
+class BackendImpl::FileUploadStream final: public ByteStream::Server {
 public:
   FileUploadStream(kj::String finalPath)
       : tmpPath(kj::str(finalPath, ".uploading")),

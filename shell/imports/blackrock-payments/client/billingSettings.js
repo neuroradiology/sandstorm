@@ -21,6 +21,9 @@ import { _ } from "meteor/underscore";
 
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
 
+import { StripeCards, StripeCustomerData, updateStripeData }
+  from "/imports/blackrock-payments/client/payments-client.js";
+
 var messageListener = function (showPrompt, template, event) {
   if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
     return;
@@ -66,9 +69,8 @@ Template.billingSettings.events({
     console.log(ev.target);
     frame.contentWindow.postMessage({openDialog: true}, "*");
   },
-  "click .delete-card": function (ev) {
+  "click .delete-card": function (_ev) {
     var id = this.id;
-    var template = Template.instance();
     Meteor.call("deleteCardForUser", id, function (err) {
       if (err) {
         alert(err); // TODO(soon): make this UI better
@@ -79,8 +81,7 @@ Template.billingSettings.events({
       updateStripeData();
     });
   },
-  "click .make-primary-card": function (ev) {
-    var template = Template.instance();
+  "click .make-primary-card": function (_ev) {
     StripeCards.update({isPrimary: true}, {$set: {isPrimary: false}});
     StripeCards.update({_id: this.id}, {$set: {isPrimary: true}});
     Meteor.call("makeCardPrimary", this.id, function (err) {

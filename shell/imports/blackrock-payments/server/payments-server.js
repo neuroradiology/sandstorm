@@ -30,6 +30,7 @@ import { Meteor } from "meteor/meteor";
 import { Mongo } from "meteor/mongo";
 import { check } from "meteor/check";
 import { Random } from "meteor/random";
+import { HTTP } from "meteor/http";
 import { _ } from "meteor/underscore";
 
 import { SandstormDb } from "/imports/sandstorm-db/db.js";
@@ -39,7 +40,7 @@ import { MAILING_LIST_BONUS } from "/imports/blackrock-payments/constants.js";
 const ROOT_URL = process.env.ROOT_URL;
 const HOSTNAME = Url.parse(ROOT_URL).hostname;
 
-stripe = StripeModule(Meteor.settings.stripeKey);
+export const stripe = StripeModule(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
 

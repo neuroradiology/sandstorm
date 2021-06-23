@@ -4,8 +4,6 @@ on: [push, pull_request]
 
 env:
   CCACHE_DIR: ${{ github.workspace }}/.ccache"
-  # TODO: remove this. See https://github.com/sandstorm-io/sandstorm/issues/3188
-  SKIP_UNITTESTS: 1
 jobs:
   build_and_test:
     runs-on: ubuntu-latest
@@ -60,13 +58,21 @@ jobs:
       #  with:
       #    name: ccache-debug.tar.gz
       #    path: ccache-debug.tar.gz
-      #- name: upload sandstorm tarball
-      #  uses: actions/upload-artifact@v1
-      #  with:
-      #    name: sandstorm-0-fast.tar.xz
-      #    path: sandstorm-0-fast.tar.xz
+      - name: upload sandstorm tarball
+        if: always()
+        uses: actions/upload-artifact@v2
+        with:
+          name: sandstorm-0-fast.tar.xz
+          path: sandstorm-0-fast.tar.xz
       - name: lint
-        run: make lint
+        run: |
+          # In addition to making sure the linting step doesn't flag any errors,
+          # we also want to make sure the number of warnings doesn't increase.
+          # We check for equality; if the number decreases, great! But then update
+          # the constant below.
+          make lint | tee lint.log
+          num_problems=$(cat lint.log | grep ' problems (0 errors, ' | awk '{print $2}')
+          [ "$num_problems" = 778 ]
       - name: test
         run: |
           set -o pipefail
@@ -75,7 +81,13 @@ jobs:
           (make test |& tee testlog.txt; echo "Result: $?") || true
       - name: upload test log
         if: always()
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v2
         with:
           name: testlog.txt
           path: testlog.txt
+      - name: upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v2
+        with:
+          name: screenshots
+          path: tests/screenshots

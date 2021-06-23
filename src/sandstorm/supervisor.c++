@@ -39,7 +39,6 @@
 #include <sys/syscall.h>
 #include <linux/sockios.h>
 #include <linux/route.h>
-#include <sandstorm/ip_tables.h>  // created by Makefile from <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter/nf_nat.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -71,6 +70,8 @@
 #endif
 #include <seccomp.h>
 
+#include <linux/filter.h>
+
 #include <sandstorm/grain.capnp.h>
 #include <sandstorm/supervisor.capnp.h>
 
@@ -84,6 +85,16 @@
 #endif
 
 namespace sandstorm {
+
+// seccomp filter generated from filter.s:
+static sock_filter seccomp_filter[] = {
+#include <sandstorm/seccomp-bpf/filter.h>
+};
+
+static sock_fprog seccomp_fprog = sock_fprog {
+  .len = sizeof seccomp_filter / sizeof seccomp_filter[0],
+  .filter = &seccomp_filter[0],
+};
 
 // =======================================================================================
 // Directory size watcher
@@ -588,6 +599,12 @@ kj::MainFunc SupervisorMain::getMain() {
                  "Dump libseccomp PFC output.")
       .addOption({'n', "new"}, [this]() { setIsNew(true); return true; },
                  "Initializes a new grain.  (Otherwise, runs an existing one.)")
+      .addOption({"use-experimental-seccomp-filter"},
+                 [this]() { useExperimentalSeccompFilter = true; return true; },
+                 "Use the new, experimental seccomp filter.")
+      .addOption({"log-seccomp-violations"},
+                 [this]() { logSeccompViolations = true; return true; },
+                 "Log seccomp filter violations")
       .expectArg("<app-name>", KJ_BIND_METHOD(*this, setAppName))
       .expectArg("<grain-id>", KJ_BIND_METHOD(*this, setGrainId))
       .expectOneOrMoreArgs("<command>", KJ_BIND_METHOD(*this, addCommandArg))
@@ -1082,7 +1099,19 @@ void SupervisorMain::setupStdio() {
   // supervisor, stdout is how we tell our parent that we're ready to receive connections.
 }
 
-void SupervisorMain::setupSeccomp() {
+void SupervisorMain::setupSeccompNew() {
+  int flags = 0;
+  if(logSeccompViolations) {
+    flags = SECCOMP_FILTER_FLAG_LOG;
+  }
+  KJ_SYSCALL(syscall(
+        SYS_seccomp,
+        SECCOMP_SET_MODE_FILTER,
+        flags,
+        &seccomp_fprog));
+}
+
+void SupervisorMain::setupSeccompLegacy() {
   // Install a rudimentary seccomp blacklist.
   // TODO(security): Change this to a whitelist.
 
@@ -1224,6 +1253,9 @@ void SupervisorMain::setupSeccomp() {
   // TODO(cleanup): Can we somehow specify "disallow all calls greater than N" to preemptively
   //   disable things until we've reviewed them?
   CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(userfaultfd), 0));
+  CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(io_pgetevents), 0));
+  CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(rseq), 0));
+  CHECK_SECCOMP(seccomp_rule_add(ctx, SCMP_ACT_ERRNO(ENOSYS), SCMP_SYS(pkey_mprotect), 0));
 
   // TOOD(someday): See if we can get away with turning off mincore, madvise, sysinfo etc.
 
@@ -1917,7 +1949,7 @@ public:
     auto grainOwner = req.getSealFor().initGrain();
     grainOwner.setGrainId(grainId);
     grainOwner.setSaveLabel(args.getLabel());
-    return req.send().then([this, context](auto args) mutable -> void {
+    return req.send().then([context](auto args) mutable -> void {
       context.getResults().setToken(args.getSturdyRef());
     });
   }
@@ -2134,7 +2166,7 @@ public:
         auto req = params.getStream().writeRequest();
         auto data = req.initData(backlog1);
         in.read(data.begin(), backlog1);
-        firstWrite = req.send().ignoreResult();
+        firstWrite = req.send();
       }
     }
 
@@ -2210,31 +2242,32 @@ public:
       }
     }
 
-    auto fullPath = kj::str("sandbox/www/", path);
-    KJ_IF_MAYBE(fd, raiiOpenIfExists(fullPath, O_RDONLY)) {
-      struct stat stats;
-      KJ_SYSCALL(fstat(*fd, &stats));
+    auto sandboxDir = raiiOpen("sandbox", O_RDONLY);
+    KJ_IF_MAYBE(wwwDir, raiiOpenAtIfExistsContained(sandboxDir.get(), kj::Path{"www"}, O_RDONLY)) {
+      KJ_IF_MAYBE(fd, raiiOpenAtIfExistsContained(wwwDir->get(), kj::Path::parse(path), O_RDONLY)) {
+        struct stat stats;
+        KJ_SYSCALL(fstat(*fd, &stats));
 
-      if (S_ISREG(stats.st_mode)) {
-        auto stream = params.getStream();
-        context.releaseParams();
-        auto req = stream.expectSizeRequest();
-        req.setSize(stats.st_size);
-        auto expectSizeTask = req.send();
-        auto inStream = kj::heap<kj::FdInputStream>(kj::mv(*fd));
-        return pump(*inStream, kj::mv(stream)).attach(kj::mv(inStream), kj::mv(expectSizeTask));
-      } else if (S_ISDIR(stats.st_mode)) {
-        context.getResults(capnp::MessageSize {4, 0})
-            .setStatus(Supervisor::WwwFileStatus::DIRECTORY);
-        return kj::READY_NOW;
-      } else {
-        KJ_FAIL_ASSERT("not a regular file");
+        if (S_ISREG(stats.st_mode)) {
+          auto stream = params.getStream();
+          context.releaseParams();
+          auto req = stream.expectSizeRequest();
+          req.setSize(stats.st_size);
+          auto expectSizeTask = req.send();
+          auto inStream = kj::heap<kj::FdInputStream>(kj::mv(*fd));
+          return pump(*inStream, kj::mv(stream)).attach(kj::mv(inStream), kj::mv(expectSizeTask));
+        } else if (S_ISDIR(stats.st_mode)) {
+          context.getResults(capnp::MessageSize {4, 0})
+              .setStatus(Supervisor::WwwFileStatus::DIRECTORY);
+          return kj::READY_NOW;
+        } else {
+          KJ_FAIL_ASSERT("not a regular file");
+        }
       }
-    } else {
-      context.getResults(capnp::MessageSize {4, 0})
-          .setStatus(Supervisor::WwwFileStatus::NOT_FOUND);
-      return kj::READY_NOW;
     }
+    context.getResults(capnp::MessageSize {4, 0})
+        .setStatus(Supervisor::WwwFileStatus::NOT_FOUND);
+    return kj::READY_NOW;
   }
 
 private:
@@ -2257,7 +2290,7 @@ private:
     }
   }
 
-  class LogWatcher: public Handle::Server, private kj::TaskSet::ErrorHandler {
+  class LogWatcher final: public Handle::Server, private kj::TaskSet::ErrorHandler {
   public:
     explicit LogWatcher(kj::UnixEventPort& eventPort, kj::StringPtr logPath,
                         kj::AutoCloseFd logFileParam, ByteStream::Client stream)
@@ -2287,6 +2320,31 @@ private:
       KJ_LOG(ERROR, exception);
     }
 
+    // Read all unread data from logFile and send it to the stream.
+    kj::Promise<void> copyLog() {
+      auto req = stream.writeRequest();
+      auto orphanage =
+          capnp::Orphanage::getForMessageContaining<ByteStream::WriteParams::Builder>(req);
+      auto orphan = orphanage.newOrphan<capnp::Data>(4096);
+      auto data = orphan.get();
+
+      size_t n = kj::FdInputStream(logFile.get())
+          .tryRead(data.begin(), data.size(), data.size());
+      bool done = n < data.size();
+      if (done) {
+        orphan.truncate(n);
+      }
+      req.adoptData(kj::mv(orphan));
+
+      if(done) {
+        return req.send();
+      } else {
+        return req.send().then([this]() {
+          return copyLog();
+        });
+      }
+    }
+
     kj::Promise<void> watchLoop() {
       // Exhaust all events from the inotify queue, because edge triggering.
       // Luckily we don't actually have to interpret the events because we're only waiting on
@@ -2308,33 +2366,13 @@ private:
         KJ_SYSCALL(lseek(logFile, 0, SEEK_SET));
       }
 
-      // Read all unread data from logFile and send it to the stream.
-      // TODO(perf): Flow control? Currently we avoid asking for very much data at once.
-      for (;;) {
-        auto req = stream.writeRequest();
-        auto orphanage =
-            capnp::Orphanage::getForMessageContaining<ByteStream::WriteParams::Builder>(req);
-        auto orphan = orphanage.newOrphan<capnp::Data>(4096);
-        auto data = orphan.get();
+      return copyLog().then([this]() {
+        KJ_SYSCALL(lastOffset = lseek(logFile, 0, SEEK_CUR));
 
-        size_t n = kj::FdInputStream(logFile.get())
-            .tryRead(data.begin(), data.size(), data.size());
-        bool done = n < data.size();
-        if (done) {
-          orphan.truncate(n);
-        }
-        req.adoptData(kj::mv(orphan));
-
-        tasks.add(req.send().ignoreResult());
-
-        if (done) break;
-      }
-
-      KJ_SYSCALL(lastOffset = lseek(logFile, 0, SEEK_CUR));
-
-      // OK, now wait for more.
-      return inotifyObserver.whenBecomesReadable().then([this]() {
-        return watchLoop();
+        // OK, now wait for more.
+        return inotifyObserver.whenBecomesReadable().then([this]() {
+          return watchLoop();
+        });
       });
     }
 
@@ -2377,6 +2415,14 @@ kj::Promise<void> SupervisorMain::DefaultSystemConnector::run(
 }
 
 // -----------------------------------------------------------------------------
+
+void SupervisorMain::setupSeccomp() {
+  if(useExperimentalSeccompFilter) {
+    setupSeccompNew();
+  } else {
+    setupSeccompLegacy();
+  }
+}
 
 [[noreturn]] void SupervisorMain::runSupervisor(int apiFd, kj::AutoCloseFd startEventFd) {
   // We're currently in a somewhat dangerous state: our root directory is controlled

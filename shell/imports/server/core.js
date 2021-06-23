@@ -19,13 +19,16 @@ import { Match, check } from "meteor/check";
 import { _ } from "meteor/underscore";
 
 import Crypto from "crypto";
-import { inMeteor, waitPromise } from "/imports/server/async-helpers.js";
+import { inMeteor, waitPromise } from "/imports/server/async-helpers.ts";
 import { StaticAssetImpl, IdenticonStaticAssetImpl } from "/imports/server/static-asset.js";
 import { PersistentImpl, hashSturdyRef, generateSturdyRef, checkRequirements,
          fetchApiToken, insertApiToken } from "/imports/server/persistent.js";
 import { SandstormBackend } from "/imports/server/backend.js";
 import { hashAppIdForIdenticon } from "/imports/sandstorm-identicons/helpers.js";
 import { globalDb } from "/imports/db-deprecated.js";
+import { schedulePeriodic, scheduleOneShot } from "/imports/server/scheduled-job.js";
+import { makeGatewayRouter } from "/imports/server/gateway-router.js";
+import { makeShellCli } from "/imports/server/shell-cli.js";
 import Capnp from "/imports/server/capnp.js";
 
 const PersistentHandle = Capnp.importSystem("sandstorm/supervisor.capnp").PersistentHandle;
@@ -682,6 +685,12 @@ class SandstormCoreFactoryImpl {
   getGatewayRouter() {
     return startupCompleted.then(() => {
       return { router: makeGatewayRouter() };
+    });
+  }
+
+  getShellCli() {
+    return startupCompleted.then(() => {
+      return { shellCli: makeShellCli() };
     });
   }
 }

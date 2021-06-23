@@ -52,6 +52,8 @@ function common({browser, refStr, firstWaitDuration, shouldRepeat}) {
     .grainFrame()
     .waitForElementPresent(selector, short_wait)
     .click(selector)
+    .waitForElementVisible("#sched-response", short_wait)
+    .assert.containsText("#sched-response", "Success: true")
     .frameParent()
     .execute('Meteor.call("runDueJobsAt", ' + firstCheck.toString() + ');')
     .pause(short_wait)
